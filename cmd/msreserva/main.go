@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/julienschmidt/httprouter"
+	"github.com/labstack/echo/v4"
 	"github.com/streadway/amqp"
 )
 
@@ -99,24 +99,23 @@ func setupRabbitMQ() {
 	}()
 }
 
-func helloHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	name := ps.ByName("name")
-	
+func helloHandler(c echo.Context) error {
+	name := c.Param("name")
+
 	// Criar ID único para a correlação
 	corrID := fmt.Sprintf("%d", time.Now().UnixNano())
-	
+
 	// Criar canal para receber resposta
 	responseCh := make(chan Response)
 	responses[corrID] = responseCh
-	
+
 	// Preparar mensagem
 	message := Message{Name: name}
 	body, err := json.Marshal(message)
 	if err != nil {
-		http.Error(w, "Erro ao processar requisição", http.StatusInternalServerError)
-		return
+		return c.String(http.StatusInternalServerError, "Erro ao processar requisição")
 	}
-	
+
 	// Publicar mensagem
 	err = ch.Publish(
 		"",            // exchange
@@ -130,18 +129,16 @@ func helloHandler(w http.ResponseWriter, r *http.Request, ps httprouter.Params) 
 			Body:          body,
 		})
 	if err != nil {
-		http.Error(w, "Erro ao enviar mensagem", http.StatusInternalServerError)
-		return
+		return c.String(http.StatusInternalServerError, "Erro ao enviar mensagem")
 	}
-	
+
 	// Aguardar resposta com timeout
 	select {
 	case response := <-responseCh:
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		return c.JSON(http.StatusOK, response)
 	case <-time.After(5 * time.Second):
-		http.Error(w, "Timeout ao aguardar resposta", http.StatusGatewayTimeout)
 		delete(responses, corrID)
+		return c.String(http.StatusGatewayTimeout, "Timeout ao aguardar resposta")
 	}
 }
 
@@ -149,10 +146,10 @@ func main() {
 	setupRabbitMQ()
 	defer conn.Close()
 	defer ch.Close()
-	
-	router := httprouter.New()
-	router.GET("/hello/:name", helloHandler)
-	
+
+	e := echo.New()
+	e.GET("/hello/:name", helloHandler)
+
 	fmt.Println("Servidor iniciado na porta 8080")
-	log.Fatal(http.ListenAndServe(":8080", router))
+	e.Logger.Fatal(e.Start(":8080"))
 }
