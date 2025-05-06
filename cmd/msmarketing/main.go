@@ -245,13 +245,10 @@ func enviaPromocoes(ch *amqp.Channel) {
 }
 
 func main() {
-	// Carregar certificados
 	loadCertificates()
 
-	// Carregar cruzeiros
 	loadCruzeiros()
 
-	// Tenta conectar ao RabbitMQ com retry
 	var conn *amqp.Connection
 	var err error
 
