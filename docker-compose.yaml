@@ -26,6 +26,7 @@ services:
       - ./certificates/msreserva/private.key.pem:/app/certs/msreserva/private.key.pem
       - ./certificates/msbilhete/public_key.pem:/app/certs/msbilhete/public_key.pem
       - ./certificates/mspagamento/public_key.pem:/app/certs/mspagamento/public_key.pem
+      - ./data/cruzeiros.json:/app/data/cruzeiros.json
     environment:
       - RABBITMQ_HOST=rabbitmq
     restart: on-failure
@@ -55,6 +56,21 @@ services:
     volumes:
       - ./certificates/msbilhete/private_key.pem:/app/certs/msbilhete/private_key.pem
       - ./certificates/msreserva/public_key.pem:/app/certs/msreserva/public_key.pem
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    restart: on-failure
+
+  msmarketing:
+    build:
+      context: .
+      dockerfile: cmd/msmarketing/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./certificates/msmarketing/private_key.pem:/app/certs/msmarketing/private_key.pem
+      - ./certificates/msmarketing/public_key.pem:/app/certs/msmarketing/public_key.pem
+      - ./data/cruzeiros.json:/app/data/cruzeiros.json
     environment:
       - RABBITMQ_HOST=rabbitmq
     restart: on-failure
