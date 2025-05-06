@@ -1,4 +1,3 @@
-version: '3'
 
 services:
   rabbitmq:
@@ -23,6 +22,10 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+    volumes:
+      - ./certificates/msreserva/private.key.pem:/app/certs/msreserva/private.key.pem
+      - ./certificates/msbilhete/public_key.pem:/app/certs/msbilhete/public_key.pem
+      - ./certificates/mspagamento/public_key.pem:/app/certs/mspagamento/public_key.pem
     environment:
       - RABBITMQ_HOST=rabbitmq
     restart: on-failure
@@ -34,17 +37,24 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+    volumes:
+      - ./certificates/mspagamento/private_key.pem:/app/certs/mspagamento/private_key.pem
+      - ./certificates/msreserva/public_key.pem:/app/certs/msreserva/public_key.pem
+      - ./certificates/msbilhete/public_key.pem:/app/certs/msbilhete/public_key.pem
     environment:
       - RABBITMQ_HOST=rabbitmq
     restart: on-failure
 
-  msprocessador:
+  msbilhete:
     build:
       context: .
-      dockerfile: cmd/msprocessador/Dockerfile
+      dockerfile: cmd/msbilhete/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
+    volumes:
+      - ./certificates/msbilhete/private_key.pem:/app/certs/msbilhete/private_key.pem
+      - ./certificates/msreserva/public_key.pem:/app/certs/msreserva/public_key.pem
     environment:
       - RABBITMQ_HOST=rabbitmq
     restart: on-failure
