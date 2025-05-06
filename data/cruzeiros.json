@@ -1,0 +1,122 @@
+[
+  {
+    "id": 1,
+    "nome": "Caribe Deslumbrante",
+    "empresa": "Royal Caribbean",
+    "itinerario": ["Miami", "Nassau", "San Juan", "St. Maarten", "Miami"],
+    "portoEmbarque": "Miami",
+    "portoDesembarque": "Miami",
+    "dataEmbarque": "2025-06-15",
+    "dataDesembarque": "2025-06-22",
+    "cabinesDisponiveis": 85,
+    "valorCabine": 2799.90
+  },
+  {
+    "id": 2,
+    "nome": "Maravilhas da Europa",
+    "empresa": "MSC Cruzeiros",
+    "itinerario": ["Barcelona", "Marselha", "Gênova", "Roma", "Palermo", "Barcelona"],
+    "portoEmbarque": "Barcelona",
+    "portoDesembarque": "Barcelona",
+    "dataEmbarque": "2025-07-10",
+    "dataDesembarque": "2025-07-17",
+    "cabinesDisponiveis": 120,
+    "valorCabine": 3299.90
+  },
+  {
+    "id": 3,
+    "nome": "Costa Brasileira",
+    "empresa": "Costa Cruzeiros",
+    "itinerario": ["Santos", "Rio de Janeiro", "Búzios", "Ilhabela", "Santos"],
+    "portoEmbarque": "Santos",
+    "portoDesembarque": "Santos",
+    "dataEmbarque": "2025-08-05",
+    "dataDesembarque": "2025-08-12",
+    "cabinesDisponiveis": 95,
+    "valorCabine": 1899.90
+  },
+  {
+    "id": 4,
+    "nome": "Alasca Selvagem",
+    "empresa": "Norwegian Cruise Line",
+    "itinerario": ["Seattle", "Juneau", "Skagway", "Glacier Bay", "Ketchikan", "Victoria", "Seattle"],
+    "portoEmbarque": "Seattle",
+    "portoDesembarque": "Seattle",
+    "dataEmbarque": "2025-06-20",
+    "dataDesembarque": "2025-06-27",
+    "cabinesDisponiveis": 60,
+    "valorCabine": 4299.90
+  },
+  {
+    "id": 5,
+    "nome": "Mediterrâneo Clássico",
+    "empresa": "Princess Cruises",
+    "itinerario": ["Veneza", "Dubrovnik", "Santorini", "Atenas", "Katakolon", "Veneza"],
+    "portoEmbarque": "Veneza",
+    "portoDesembarque": "Veneza",
+    "dataEmbarque": "2025-09-12",
+    "dataDesembarque": "2025-09-19",
+    "cabinesDisponiveis": 75,
+    "valorCabine": 3699.90
+  },
+  {
+    "id": 6,
+    "nome": "Ilhas Gregas",
+    "empresa": "Celebrity Cruises",
+    "itinerario": ["Atenas", "Mykonos", "Kusadasi", "Rhodes", "Santorini", "Atenas"],
+    "portoEmbarque": "Atenas",
+    "portoDesembarque": "Atenas",
+    "dataEmbarque": "2025-07-25",
+    "dataDesembarque": "2025-08-01",
+    "cabinesDisponiveis": 110,
+    "valorCabine": 3999.90
+  },
+  {
+    "id": 7,
+    "nome": "Fiordes Noruegueses",
+    "empresa": "Holland America Line",
+    "itinerario": ["Copenhague", "Oslo", "Flam", "Bergen", "Stavanger", "Copenhague"],
+    "portoEmbarque": "Copenhague",
+    "portoDesembarque": "Copenhague",
+    "dataEmbarque": "2025-08-15",
+    "dataDesembarque": "2025-08-22",
+    "cabinesDisponiveis": 65,
+    "valorCabine": 4599.90
+  },
+  {
+    "id": 8,
+    "nome": "Oceano Pacífico Sul",
+    "empresa": "P&O Cruises",
+    "itinerario": ["Sydney", "Noumea", "Port Vila", "Lifou", "Sydney"],
+    "portoEmbarque": "Sydney",
+    "portoDesembarque": "Sydney",
+    "dataEmbarque": "2025-10-05",
+    "dataDesembarque": "2025-10-12",
+    "cabinesDisponiveis": 90,
+    "valorCabine": 2499.90
+  },
+  {
+    "id": 9,
+    "nome": "Caribe Oriental",
+    "empresa": "Carnival Cruise Line",
+    "itinerario": ["Fort Lauderdale", "Grand Turk", "San Juan", "St. Thomas", "Half Moon Cay", "Fort Lauderdale"],
+    "portoEmbarque": "Fort Lauderdale",
+    "portoDesembarque": "Fort Lauderdale",
+    "dataEmbarque": "2025-11-10",
+    "dataDesembarque": "2025-11-17",
+    "cabinesDisponiveis": 130,
+    "valorCabine": 1999.90
+  },
+  {
+    "id": 10,
+    "nome": "Asiático Exótico",
+    "empresa": "Royal Caribbean",
+    "itinerario": ["Singapura", "Kuala Lumpur", "Penang", "Phuket", "Singapura"],
+    "portoEmbarque": "Singapura",
+    "portoDesembarque": "Singapura",
+    "dataEmbarque": "2025-09-25",
+    "dataDesembarque": "2025-10-02",
+    "cabinesDisponiveis": 70,
+    "valorCabine": 3899.90
+  }
+]
