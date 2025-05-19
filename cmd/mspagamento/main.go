@@ -160,8 +160,8 @@ func processPayment(request model.ReservationRequest) (model.PaymentResponse, bo
 	// Em um sistema real, você integraria com um gateway de pagamento aqui
 
 	paymentID := uuid.New().String() // Validar número do cartão (simulação simples)
-	valid := time.Now().UnixNano()%5 != 0
-
+	//valid := time.Now().UnixNano()%5 != 0
+	valid := true
 	if !valid {
 		return model.PaymentResponse{
 			PaymentID:     paymentID,
@@ -195,7 +195,7 @@ func main() {
 	var err error
 
 	for i := 0; i < 5; i++ {
-		conn, err = amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+		conn, err = amqp.Dial("amqp://guest:guest@localhost:5672/")
 		if err == nil {
 			break
 		}

@@ -171,7 +171,7 @@ func setupRabbitMQ() {
 
 	// Tenta conectar ao RabbitMQ com retry
 	for i := 0; i < 5; i++ {
-		conn, err = amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+		conn, err = amqp.Dial("amqp://guest:guest@localhost:5672/")
 		if err == nil {
 			break
 		}
@@ -365,13 +365,16 @@ func createReservationHandler(c echo.Context) error {
 
 	var wg sync.WaitGroup
 
-	var bilheteResponse model.BilheteResponse
-	var responseReady bool = false
+	// Criar canal para receber o bilhete
+	bilheteResponseChan := make(chan model.BilheteResponse, 1)
+	// Canal para sinalizar erro de pagamento recusado
+	pagamentoRecusadoChan := make(chan bool, 1)
 
 	fmt.Println("Entrou na goroutine de processamento")
 	// Adiciona 1 ao contador do WaitGroup
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			select {
 			case msg := <-msgsPagamentosRecusados:
@@ -380,7 +383,7 @@ func createReservationHandler(c echo.Context) error {
 				// Verificar se há uma chave pública nos headers
 				var receivedPublicKeyPEM string
 
-				if receivedPublicKeyPEM, ok = msg.Headers["public_key"].(string); !ok {
+				if receivedPublicKeyPEM, ok = msg.Headers["key"].(string); !ok {
 					log.Printf("Chave pública não encontrada nos headers, rejeitando mensagem")
 					msg.Nack(false, false) // Rejeitar mensagem sem requeue
 					continue
@@ -414,7 +417,10 @@ func createReservationHandler(c echo.Context) error {
 				fmt.Println(paymentResponse)
 				msg.Ack(false)
 
-				wg.Done()
+				// Sinalizar que o pagamento foi recusado
+				pagamentoRecusadoChan <- true
+				return // Encerra a goroutine
+
 			case msg := <-msgsBilhetesGerados:
 				log.Printf("Recebido bilhete gerado: %s", msg.Body)
 
@@ -452,21 +458,44 @@ func createReservationHandler(c echo.Context) error {
 					msg.Nack(false, false)
 					continue
 				}
-
-				fmt.Println(bilheteResponse)
-				responseReady = true
 				msg.Ack(false)
-				wg.Done()
+
+				// Enviar o bilhete pelo canal
+				bilheteResponseChan <- bilheteResponse
+				return // Encerra a goroutine
 			}
 		}
 	}()
-	wg.Wait()
-	fmt.Println("Saiu da goroutine de processamento")
-	if responseReady {
+
+	// Aguardar a conclusão da goroutine ou timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	// Definir timeout de 30 segundos para a operação
+	timeout := time.After(30 * time.Second)
+
+	// Aguardar por um dos eventos: bilhete gerado, pagamento recusado ou timeout
+	select {
+	case bilheteResponse := <-bilheteResponseChan:
+		fmt.Println("Bilhete recebido com sucesso")
 		return c.JSON(http.StatusOK, bilheteResponse)
-	} else {
+	case <-pagamentoRecusadoChan:
+		fmt.Println("Pagamento recusado")
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "Pagamento recusado para esta reserva",
+		})
+	case <-timeout:
+		fmt.Println("Timeout ao aguardar resposta")
+		return c.JSON(http.StatusRequestTimeout, map[string]string{
+			"error": "Timeout ao processar a reserva",
+		})
+	case <-done:
+		fmt.Println("Processamento concluído sem resposta válida")
 		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "Não foi possível gerar o bilhete",
+			"error": "Não foi possível processar a reserva",
 		})
 	}
 }

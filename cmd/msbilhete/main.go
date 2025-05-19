@@ -167,7 +167,7 @@ func main() {
 	var err error
 
 	for i := 0; i < 5; i++ {
-		conn, err = amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+		conn, err = amqp.Dial("amqp://guest:guest@localhost:5672/")
 		if err == nil {
 			break
 		}
@@ -269,6 +269,8 @@ func main() {
 				continue
 			}
 
+			msg.Ack(false)
+
 			// Publicar resposta
 			err = ch.Publish(
 				"",
@@ -283,9 +285,7 @@ func main() {
 				})
 			if err != nil {
 				log.Printf("Erro ao enviar resposta: %s", err)
-				msg.Nack(false, true) // Rejeitar mensagem com requeue
-			} else {
-				msg.Ack(false) // Confirmar processamento bem-sucedido
+			} else { // Confirmar processamento bem-sucedido
 				log.Printf("Resposta de reserva enviada, ID: %s, status: %s",
 					response.ReservationID, response.Status)
 			}
