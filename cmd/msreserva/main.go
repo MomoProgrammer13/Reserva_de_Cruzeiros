@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -36,15 +39,18 @@ type Cruzeiro struct {
 	DataDesembarque    string   `json:"dataDesembarque"`
 	CabinesDisponiveis int      `json:"cabinesDisponiveis"`
 	ValorCabine        float64  `json:"valorCabine"`
-	ImagemURL          string   `json:"imagemURL"`          // Adicionado para o front-end
-	DescricaoDetalhada string   `json:"descricaoDetalhada"` // Adicionado para o front-end
+	ImagemURL          string   `json:"imagemURL"`
+	DescricaoDetalhada string   `json:"descricaoDetalhada"`
 }
 
 var (
-	privateKey           *rsa.PrivateKey
-	msbilhetePublicKey   *rsa.PublicKey
-	mspagamentoPublicKey *rsa.PublicKey
-	listaDeCruzeiros     []Cruzeiro // Variável global para armazenar os dados dos cruzeiros
+	// Chave privada deste microsserviço (MSReserva)
+	msReservaPrivateKey *rsa.PrivateKey
+	// Chaves públicas dos outros microsserviços dos quais MSReserva consome mensagens
+	msPagamentoPublicKey *rsa.PublicKey
+	msBilhetePublicKey   *rsa.PublicKey
+
+	listaDeCruzeiros []Cruzeiro
 )
 
 var (
@@ -69,13 +75,18 @@ const (
 	filaConsumoBilhetesGerados     = "msreserva_consumo_bilhete_gerado"
 )
 
+const (
+	senderIDMSReserva   = "msreserva"
+	senderIDMSPagamento = "mspagamento"
+	senderIDMSBilhete   = "msbilhete"
+)
+
 func failOnError(err error, msg string) {
 	if err != nil {
 		log.Fatalf("%s: %s", msg, err)
 	}
 }
 
-// Função para carregar os dados dos cruzeiros do arquivo JSON
 func loadCruzeirosData(filePath string) error {
 	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
@@ -127,6 +138,7 @@ func loadPublicKey(path string) (*rsa.PublicKey, error) {
 
 func loadCertificates() {
 	var err error
+	// Carregar chave privada do MSReserva
 	privateKeyPath := os.Getenv("PRIVATE_KEY_PATH_MSRESERVA")
 	if privateKeyPath == "" {
 		privateKeyPath = "certificates/msreserva/private_key.pem"
@@ -134,63 +146,53 @@ func loadCertificates() {
 			privateKeyPath = "/app/certs/msreserva/private_key.pem"
 		}
 	}
-	privateKey, err = loadPrivateKey(privateKeyPath)
-	failOnError(err, fmt.Sprintf("Não foi possível carregar a chave privada do msreserva de %s", privateKeyPath))
-	log.Println("Chave privada do msreserva carregada com sucesso.")
+	msReservaPrivateKey, err = loadPrivateKey(privateKeyPath)
+	failOnError(err, fmt.Sprintf("MSReserva: Não foi possível carregar a chave privada de %s", privateKeyPath))
+	log.Println("MSReserva: Chave privada carregada com sucesso.")
 
-	msbilhetePublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSBILHETE")
-	if msbilhetePublicKeyPath == "" {
-		msbilhetePublicKeyPath = "certificates/msbilhete/public_key.pem"
+	// Carregar chave pública do MSPagamento (para verificar mensagens de pagamento_aprovado/recusado)
+	msPagamentoPublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSPAGAMENTO")
+	if msPagamentoPublicKeyPath == "" {
+		msPagamentoPublicKeyPath = "certificates/mspagamento/public_key.pem"
 		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
-			msbilhetePublicKeyPath = "/app/certs/msbilhete/public_key.pem"
+			msPagamentoPublicKeyPath = "/app/certs/mspagamento/public_key.pem"
 		}
 	}
-	msbilhetePublicKey, err = loadPublicKey(msbilhetePublicKeyPath)
-	failOnError(err, fmt.Sprintf("Não foi possível carregar a chave pública do msbilhete de %s", msbilhetePublicKeyPath))
-	log.Println("Chave pública do msbilhete carregada com sucesso.")
+	msPagamentoPublicKey, err = loadPublicKey(msPagamentoPublicKeyPath)
+	failOnError(err, fmt.Sprintf("MSReserva: Não foi possível carregar a chave pública do MSPagamento de %s", msPagamentoPublicKeyPath))
+	log.Println("MSReserva: Chave pública do MSPagamento carregada com sucesso.")
 
-	mspagamentoPublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSPAGAMENTO")
-	if mspagamentoPublicKeyPath == "" {
-		mspagamentoPublicKeyPath = "certificates/mspagamento/public_key.pem"
+	// Carregar chave pública do MSBilhete (para verificar mensagens de bilhete_gerado)
+	msBilhetePublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSBILHETE")
+	if msBilhetePublicKeyPath == "" {
+		msBilhetePublicKeyPath = "certificates/msbilhete/public_key.pem"
 		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
-			mspagamentoPublicKeyPath = "/app/certs/mspagamento/public_key.pem"
+			msBilhetePublicKeyPath = "/app/certs/msbilhete/public_key.pem"
 		}
 	}
-	mspagamentoPublicKey, err = loadPublicKey(mspagamentoPublicKeyPath)
-	failOnError(err, fmt.Sprintf("Não foi possível carregar a chave pública do mspagamento de %s", mspagamentoPublicKeyPath))
-	log.Println("Chave pública do mspagamento carregada com sucesso.")
+	msBilhetePublicKey, err = loadPublicKey(msBilhetePublicKeyPath)
+	failOnError(err, fmt.Sprintf("MSReserva: Não foi possível carregar a chave pública do MSBilhete de %s", msBilhetePublicKeyPath))
+	log.Println("MSReserva: Chave pública do MSBilhete carregada com sucesso.")
 }
 
-func validateKeyPair(publicKey *rsa.PublicKey, privateKey *rsa.PrivateKey) bool {
-	return publicKey.N.Cmp(privateKey.N) == 0 && publicKey.E == privateKey.E
-}
-
-func publicKeyToPEM(publicKey *rsa.PublicKey) (string, error) {
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(publicKey)
+// signMessage assina a mensagem usando a chave privada fornecida.
+func signMessage(message []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
+	hashed := sha256.Sum256(message)
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, hashed[:])
 	if err != nil {
-		return "", fmt.Errorf("falha ao serializar chave pública para PKIX: %w", err)
+		return nil, fmt.Errorf("erro ao assinar mensagem: %w", err)
 	}
-	publicKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PUBLIC KEY",
-		Bytes: publicKeyBytes,
-	})
-	return string(publicKeyPEM), nil
+	return signature, nil
 }
 
-func pemToPublicKey(pemStr string) (*rsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(pemStr))
-	if block == nil {
-		return nil, fmt.Errorf("falha ao decodificar PEM da chave pública")
-	}
-	publicKeyInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
+// verifySignature verifica a assinatura da mensagem usando a chave pública fornecida.
+func verifySignature(message, signature []byte, publicKey *rsa.PublicKey) error {
+	hashed := sha256.Sum256(message)
+	err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, hashed[:], signature)
 	if err != nil {
-		return nil, fmt.Errorf("falha ao parsear chave pública PKIX do PEM: %w", err)
+		return fmt.Errorf("falha na verificação da assinatura: %w", err)
 	}
-	publicKey, ok := publicKeyInterface.(*rsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("chave PEM não é do tipo RSA Public Key")
-	}
-	return publicKey, nil
+	return nil
 }
 
 func setupRabbitMQ(ctx context.Context, wg *sync.WaitGroup) {
@@ -226,9 +228,9 @@ func setupRabbitMQ(ctx context.Context, wg *sync.WaitGroup) {
 			log.Printf("msreserva: Exchange '%s' (fanout) declarada.", exchangeReservaCriada)
 
 			wg.Add(3)
-			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoAprovado, filaConsumoPagamentosAprovados, handlePagamentoAprovado)
-			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoRecusado, filaConsumoPagamentosRecusados, handlePagamentoRecusado)
-			go consumeMessages(ctx, wg, amqpConnection, exchangeBilheteGerado, filaConsumoBilhetesGerados, handleBilheteGerado)
+			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoAprovado, filaConsumoPagamentosAprovados, handlePagamentoAprovado, msPagamentoPublicKey, senderIDMSPagamento)
+			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoRecusado, filaConsumoPagamentosRecusados, handlePagamentoRecusado, msPagamentoPublicKey, senderIDMSPagamento)
+			go consumeMessages(ctx, wg, amqpConnection, exchangeBilheteGerado, filaConsumoBilhetesGerados, handleBilheteGerado, msBilhetePublicKey, senderIDMSBilhete)
 
 			go func() {
 				<-ctx.Done()
@@ -249,9 +251,9 @@ func setupRabbitMQ(ctx context.Context, wg *sync.WaitGroup) {
 	failOnError(err, "msreserva: Falha ao conectar ao RabbitMQ após múltiplas tentativas")
 }
 
-func consumeMessages(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connection, exchangeName, queueName string, handlerFunc func(msg amqp.Delivery) error) {
+func consumeMessages(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connection, exchangeName, queueName string, handlerFunc func(msg amqp.Delivery) error, expectedSenderPublicKey *rsa.PublicKey, expectedSenderID string) {
 	defer wg.Done()
-	log.Printf("Iniciando consumidor para exchange '%s', fila de consumo '%s'", exchangeName, queueName)
+	log.Printf("Iniciando consumidor para exchange '%s', fila de consumo '%s', esperando remetente '%s'", exchangeName, queueName, expectedSenderID)
 
 	ch, err := conn.Channel()
 	if err != nil {
@@ -316,28 +318,30 @@ func consumeMessages(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connect
 			}
 			log.Printf("Recebida mensagem na fila '%s' (DeliveryTag: %d) da exchange '%s'", queueName, d.DeliveryTag, exchangeName)
 
-			var receivedPublicKeyPEM string
-			var keyOk bool
-			if headerKey, headerExists := d.Headers["key"]; headerExists {
-				receivedPublicKeyPEM, keyOk = headerKey.(string)
-			}
-			if !keyOk {
-				log.Printf("Chave pública não encontrada ou tipo inválido nos headers para DeliveryTag: %d na fila '%s'. Rejeitando.", d.DeliveryTag, queueName)
+			// Extrair assinatura e sender_id dos headers
+			signature, sigOk := d.Headers["signature"].([]byte)
+			senderID, senderOk := d.Headers["sender_id"].(string)
+
+			if !sigOk || !senderOk {
+				log.Printf("Header 'signature' ou 'sender_id' ausente ou tipo incorreto para DeliveryTag: %d. Rejeitando.", d.DeliveryTag)
 				d.Nack(false, false)
 				continue
 			}
-			receivedPublicKey, errKey := pemToPublicKey(receivedPublicKeyPEM)
-			if errKey != nil {
-				log.Printf("Erro ao converter PEM para chave pública para DeliveryTag: %d na fila '%s': %v. Rejeitando.", d.DeliveryTag, queueName, errKey)
+
+			if senderID != expectedSenderID {
+				log.Printf("SenderID inesperado '%s' (esperado '%s') para DeliveryTag: %d. Rejeitando.", senderID, expectedSenderID, d.DeliveryTag)
 				d.Nack(false, false)
 				continue
 			}
-			if !validateKeyPair(receivedPublicKey, privateKey) {
-				log.Printf("Chave pública recebida no header não corresponde à chave privada do msreserva para DeliveryTag: %d na fila '%s'. Rejeitando.", d.DeliveryTag, queueName)
-				d.Nack(false, false)
+
+			// Verificar assinatura
+			errVerify := verifySignature(d.Body, signature, expectedSenderPublicKey)
+			if errVerify != nil {
+				log.Printf("Falha na verificação da assinatura para DeliveryTag: %d (remetente: %s): %v. Rejeitando.", d.DeliveryTag, senderID, errVerify)
+				d.Nack(false, false) // Não reenfileirar mensagens com assinatura inválida
 				continue
 			}
-			log.Printf("Chave pública (do destinatário msreserva) validada com sucesso para DeliveryTag: %d na fila '%s'.", d.DeliveryTag, queueName)
+			log.Printf("Assinatura verificada com sucesso para DeliveryTag: %d (remetente: %s).", d.DeliveryTag, senderID)
 
 			if errHandler := handlerFunc(d); errHandler != nil {
 				log.Printf("Erro no handler para DeliveryTag: %d na fila '%s': %v", d.DeliveryTag, queueName, errHandler)
@@ -351,7 +355,7 @@ func consumeMessages(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connect
 }
 
 func handlePagamentoAprovado(msg amqp.Delivery) error {
-	log.Printf("Handler: Pagamento Aprovado recebido: %s", msg.Body)
+	log.Printf("Handler: Pagamento Aprovado recebido (corpo já verificado): %s", msg.Body)
 	var paymentResponse model.PaymentResponse
 	if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
 		return fmt.Errorf("erro ao decodificar JSON de pagamento aprovado: %w", err)
@@ -361,7 +365,7 @@ func handlePagamentoAprovado(msg amqp.Delivery) error {
 }
 
 func handlePagamentoRecusado(msg amqp.Delivery) error {
-	log.Printf("Handler: Pagamento Recusado recebido: %s", msg.Body)
+	log.Printf("Handler: Pagamento Recusado recebido (corpo já verificado): %s", msg.Body)
 	var paymentResponse model.PaymentResponse
 	if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
 		return fmt.Errorf("erro ao decodificar JSON de pagamento recusado: %w", err)
@@ -384,7 +388,7 @@ func handlePagamentoRecusado(msg amqp.Delivery) error {
 }
 
 func handleBilheteGerado(msg amqp.Delivery) error {
-	log.Printf("Handler: Bilhete Gerado recebido: %s", msg.Body)
+	log.Printf("Handler: Bilhete Gerado recebido (corpo já verificado): %s", msg.Body)
 	var bilheteResponse model.BilheteResponse
 	if err := json.Unmarshal(msg.Body, &bilheteResponse); err != nil {
 		return fmt.Errorf("erro ao decodificar JSON de bilhete gerado: %w", err)
@@ -405,7 +409,6 @@ func handleBilheteGerado(msg amqp.Delivery) error {
 	return nil
 }
 
-// Handler para listar todos os cruzeiros
 func listCruisesHandler(c echo.Context) error {
 	log.Println("Recebida requisição para listar cruzeiros.")
 	if listaDeCruzeiros == nil {
@@ -415,7 +418,6 @@ func listCruisesHandler(c echo.Context) error {
 	return c.JSON(http.StatusOK, listaDeCruzeiros)
 }
 
-// Handler para obter detalhes de um cruzeiro específico
 func getCruiseDetailsHandler(c echo.Context) error {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
@@ -444,8 +446,7 @@ func createReservationHandler(c echo.Context) error {
 	if err := c.Bind(&request); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Dados inválidos para reserva"})
 	}
-
-	if request.CruiseID == "" { // O ID do cruzeiro deve ser fornecido
+	if request.CruiseID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ID do cruzeiro é obrigatório"})
 	}
 	if request.Customer == "" {
@@ -480,10 +481,11 @@ func createReservationHandler(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao processar requisição"})
 	}
 
-	mspagamentoKeyPem, err := publicKeyToPEM(mspagamentoPublicKey)
+	// Assinar a mensagem com a chave privada do MSReserva
+	signature, err := signMessage(body, msReservaPrivateKey)
 	if err != nil {
-		log.Printf("Erro ao converter chave pública do mspagamento para PEM para reserva %s: %v", request.ReservationID, err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao serializar chave pública do mspagamento"})
+		log.Printf("Erro ao assinar mensagem de reserva para %s: %v", request.ReservationID, err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao assinar mensagem"})
 	}
 
 	err = amqpChannel.Publish(
@@ -495,7 +497,10 @@ func createReservationHandler(c echo.Context) error {
 			DeliveryMode: amqp.Persistent,
 			ContentType:  "application/json",
 			Body:         body,
-			Headers:      amqp.Table{"key": mspagamentoKeyPem},
+			Headers: amqp.Table{
+				"signature": signature,
+				"sender_id": senderIDMSReserva, // Identificador do remetente
+			},
 		})
 	if err != nil {
 		log.Printf("Erro ao publicar mensagem na exchange '%s' para %s: %v", exchangeReservaCriada, request.ReservationID, err)
@@ -524,7 +529,7 @@ func main() {
 	log.Println("Iniciando microserviço de reservas...")
 	loadCertificates()
 
-	cruzeirosFilePath := "data/cruzeiros.json"
+	cruzeirosFilePath := os.Getenv("CRUZEIROS_JSON_PATH")
 	if cruzeirosFilePath == "" {
 		cruzeirosFilePath = "cruzeiros.json"
 		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
@@ -543,15 +548,14 @@ func main() {
 	e := echo.New()
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
-	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{ // Configuração CORS mais explícita
-		AllowOrigins: []string{"*"}, // Em produção, restrinja isso!
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"*"},
 		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
 	}))
 
 	e.GET("/cruzeiros", listCruisesHandler)
 	e.GET("/cruzeiros/:id", getCruiseDetailsHandler)
-
 	e.POST("/reservations", createReservationHandler)
 
 	go func() {
