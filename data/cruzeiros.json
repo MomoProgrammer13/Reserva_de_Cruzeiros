@@ -9,7 +9,9 @@
     "dataEmbarque": "2025-06-15",
     "dataDesembarque": "2025-06-22",
     "cabinesDisponiveis": 85,
-    "valorCabine": 2799.90
+    "valorCabine": 2799.90,
+    "imagemURL": "https://blog.r11travel.com.br/wp-content/uploads/2023/07/RCI_WN_022022_PR_MVerdure_DroneCadiz208R-copiar-scaled.jpg",
+    "descricaoDetalhada": "Explore as águas azul-turquesa e as praias de areia branca do Caribe neste cruzeiro inesquecível. Visite ilhas exóticas, desfrute de entretenimento de classe mundial a bordo e crie memórias para toda a vida."
   },
   {
     "id": 2,
@@ -21,7 +23,9 @@
     "dataEmbarque": "2025-07-10",
     "dataDesembarque": "2025-07-17",
     "cabinesDisponiveis": 120,
-    "valorCabine": 3299.90
+    "valorCabine": 3299.90,
+    "imagemURL": "https://www.msccruzeiros.com.br/-/media/global-contents/news/msc-splendida_desktop.jpg",
+    "descricaoDetalhada": "Descubra a rica história e cultura do Mediterrâneo. De cidades antigas a paisagens deslumbrantes, este cruzeiro oferece uma jornada através dos tesouros da Europa."
   },
   {
     "id": 3,
@@ -33,7 +37,9 @@
     "dataEmbarque": "2025-08-05",
     "dataDesembarque": "2025-08-12",
     "cabinesDisponiveis": 95,
-    "valorCabine": 1899.90
+    "valorCabine": 1899.90,
+    "imagemURL": "https://www.mercadoeeventos.com.br/wp-content/uploads/2018/06/Costa-Venezia-nova-embarca%C3%A7%C3%A3o-da-Costa-Cruzeiros.jpg.jpg",
+    "descricaoDetalhada": "Navegue pela vibrante costa brasileira, apreciando praias famosas, cidades históricas e a beleza natural exuberante do Brasil. Uma experiência tropical única!"
   },
   {
     "id": 4,
@@ -45,7 +51,9 @@
     "dataEmbarque": "2025-06-20",
     "dataDesembarque": "2025-06-27",
     "cabinesDisponiveis": 60,
-    "valorCabine": 4299.90
+    "valorCabine": 4299.90,
+    "imagemURL": "https://d3uaz35ue406d5.cloudfront.net/assets/images/compagnies/norwegian-cruise-line/norwegian-epic/aerials/large/norwegian-epic-0yqw2ehynmcpf82mnxn3gh3hx8.webp",
+    "descricaoDetalhada": "Testemunhe a majestade intocada do Alasca. Geleiras imponentes, vida selvagem abundante e paisagens de tirar o fôlego esperam por você nesta aventura épica."
   },
   {
     "id": 5,
@@ -57,7 +65,9 @@
     "dataEmbarque": "2025-09-12",
     "dataDesembarque": "2025-09-19",
     "cabinesDisponiveis": 75,
-    "valorCabine": 3699.90
+    "valorCabine": 3699.90,
+    "imagemURL": "https://cdn.panrotas.com.br/portal-panrotas-statics/media-files-cache/356835/a714f1c4dbc01e117b081a68144638e7capturar2/0,0,982,586/1206,720,0.73/0/default.jpg",
+    "descricaoDetalhada": "Embarque em uma jornada pelos locais mais emblemáticos do Mediterrâneo. De canais românticos a ruínas antigas, cada porto é uma descoberta."
   },
   {
     "id": 6,
@@ -69,54 +79,8 @@
     "dataEmbarque": "2025-07-25",
     "dataDesembarque": "2025-08-01",
     "cabinesDisponiveis": 110,
-    "valorCabine": 3999.90
-  },
-  {
-    "id": 7,
-    "nome": "Fiordes Noruegueses",
-    "empresa": "Holland America Line",
-    "itinerario": ["Copenhague", "Oslo", "Flam", "Bergen", "Stavanger", "Copenhague"],
-    "portoEmbarque": "Copenhague",
-    "portoDesembarque": "Copenhague",
-    "dataEmbarque": "2025-08-15",
-    "dataDesembarque": "2025-08-22",
-    "cabinesDisponiveis": 65,
-    "valorCabine": 4599.90
-  },
-  {
-    "id": 8,
-    "nome": "Oceano Pacífico Sul",
-    "empresa": "P&O Cruises",
-    "itinerario": ["Sydney", "Noumea", "Port Vila", "Lifou", "Sydney"],
-    "portoEmbarque": "Sydney",
-    "portoDesembarque": "Sydney",
-    "dataEmbarque": "2025-10-05",
-    "dataDesembarque": "2025-10-12",
-    "cabinesDisponiveis": 90,
-    "valorCabine": 2499.90
-  },
-  {
-    "id": 9,
-    "nome": "Caribe Oriental",
-    "empresa": "Carnival Cruise Line",
-    "itinerario": ["Fort Lauderdale", "Grand Turk", "San Juan", "St. Thomas", "Half Moon Cay", "Fort Lauderdale"],
-    "portoEmbarque": "Fort Lauderdale",
-    "portoDesembarque": "Fort Lauderdale",
-    "dataEmbarque": "2025-11-10",
-    "dataDesembarque": "2025-11-17",
-    "cabinesDisponiveis": 130,
-    "valorCabine": 1999.90
-  },
-  {
-    "id": 10,
-    "nome": "Asiático Exótico",
-    "empresa": "Royal Caribbean",
-    "itinerario": ["Singapura", "Kuala Lumpur", "Penang", "Phuket", "Singapura"],
-    "portoEmbarque": "Singapura",
-    "portoDesembarque": "Singapura",
-    "dataEmbarque": "2025-09-25",
-    "dataDesembarque": "2025-10-02",
-    "cabinesDisponiveis": 70,
-    "valorCabine": 3899.90
+    "valorCabine": 3999.90,
+    "imagemURL": "https://blog.celebritycruises.com.br/wp-content/uploads/2023/07/Os-cruzeiros-da-Celebrity-Cruises-no-Brasil-scaled.jpg",
+    "descricaoDetalhada": "Viva o sonho das Ilhas Gregas, com suas casas brancas icônicas, águas cristalinas e história milenar. Uma experiência mágica e inesquecível."
   }
 ]

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -10,8 +11,11 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"reserva-cruzeiros/model"
+	"os/signal"
+	"reserva-cruzeiros/model" // Certifique-se que este path está correto
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,18 +24,50 @@ import (
 	"github.com/streadway/amqp"
 )
 
+// Estrutura para representar os dados de um cruzeiro, correspondendo ao cruzeiros.json
+type Cruzeiro struct {
+	ID                 int      `json:"id"`
+	Nome               string   `json:"nome"`
+	Empresa            string   `json:"empresa"`
+	Itinerario         []string `json:"itinerario"`
+	PortoEmbarque      string   `json:"portoEmbarque"`
+	PortoDesembarque   string   `json:"portoDesembarque"`
+	DataEmbarque       string   `json:"dataEmbarque"`
+	DataDesembarque    string   `json:"dataDesembarque"`
+	CabinesDisponiveis int      `json:"cabinesDisponiveis"`
+	ValorCabine        float64  `json:"valorCabine"`
+	ImagemURL          string   `json:"imagemURL"`          // Adicionado para o front-end
+	DescricaoDetalhada string   `json:"descricaoDetalhada"` // Adicionado para o front-end
+}
+
 var (
 	privateKey           *rsa.PrivateKey
 	msbilhetePublicKey   *rsa.PublicKey
 	mspagamentoPublicKey *rsa.PublicKey
-	pa                   amqp.Queue
-	pr                   amqp.Queue
-	bg                   amqp.Queue
+	listaDeCruzeiros     []Cruzeiro // Variável global para armazenar os dados dos cruzeiros
 )
 
-var conn *amqp.Connection
-var ch *amqp.Channel
-var responses = make(map[string]chan interface{})
+var (
+	responses      = make(map[string]chan model.BilheteResponse)
+	paymentResults = make(map[string]chan model.PaymentResponse)
+	mu             sync.Mutex
+)
+
+var amqpConnection *amqp.Connection
+var amqpChannel *amqp.Channel
+
+const (
+	exchangeReservaCriada     = "reserva_criada"
+	exchangePagamentoAprovado = "pagamento_aprovado"
+	exchangePagamentoRecusado = "pagamento_recusado"
+	exchangeBilheteGerado     = "bilhete_gerado"
+)
+
+const (
+	filaConsumoPagamentosAprovados = "msreserva_consumo_pagamento_aprovado"
+	filaConsumoPagamentosRecusados = "msreserva_consumo_pagamento_recusado"
+	filaConsumoBilhetesGerados     = "msreserva_consumo_bilhete_gerado"
+)
 
 func failOnError(err error, msg string) {
 	if err != nil {
@@ -39,485 +75,523 @@ func failOnError(err error, msg string) {
 	}
 }
 
+// Função para carregar os dados dos cruzeiros do arquivo JSON
+func loadCruzeirosData(filePath string) error {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("falha ao ler arquivo de cruzeiros %s: %w", filePath, err)
+	}
+	err = json.Unmarshal(data, &listaDeCruzeiros)
+	if err != nil {
+		return fmt.Errorf("falha ao decodificar JSON de cruzeiros: %w", err)
+	}
+	log.Printf("%d cruzeiros carregados de %s", len(listaDeCruzeiros), filePath)
+	return nil
+}
+
 func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
 	privateKeyData, err := ioutil.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("falha ao ler chave privada de %s: %w", path, err)
 	}
-
 	block, _ := pem.Decode(privateKeyData)
 	if block == nil {
-		return nil, fmt.Errorf("falha ao decodificar PEM da chave privada")
+		return nil, fmt.Errorf("falha ao decodificar PEM da chave privada de %s", path)
 	}
-
 	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("falha ao parsear chave privada PKCS1 de %s: %w", path, err)
 	}
-
 	return privateKey, nil
 }
 
 func loadPublicKey(path string) (*rsa.PublicKey, error) {
 	publicKeyData, err := ioutil.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("falha ao ler chave pública de %s: %w", path, err)
 	}
-
 	block, _ := pem.Decode(publicKeyData)
 	if block == nil {
-		return nil, fmt.Errorf("falha ao decodificar PEM da chave pública")
+		return nil, fmt.Errorf("falha ao decodificar PEM da chave pública de %s", path)
 	}
-
 	publicKeyInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("falha ao parsear chave pública PKIX de %s: %w", path, err)
 	}
-
 	publicKey, ok := publicKeyInterface.(*rsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("chave não é do tipo RSA Public Key")
+		return nil, fmt.Errorf("chave pública de %s não é do tipo RSA", path)
 	}
-
 	return publicKey, nil
 }
 
 func loadCertificates() {
 	var err error
-
-	// Carregar chave privada do microserviço msreserva
-	privateKeyPath := "/app/certs/msreserva/private_key.pem"
-	if _, err := os.Stat(privateKeyPath); os.IsNotExist(err) {
+	privateKeyPath := os.Getenv("PRIVATE_KEY_PATH_MSRESERVA")
+	if privateKeyPath == "" {
 		privateKeyPath = "certificates/msreserva/private_key.pem"
+		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
+			privateKeyPath = "/app/certs/msreserva/private_key.pem"
+		}
 	}
-
 	privateKey, err = loadPrivateKey(privateKeyPath)
-	if err != nil {
-		log.Fatalf("Não foi possível carregar a chave privada: %v", err)
-	} else {
-		log.Println("Chave privada carregada com sucesso")
-	}
+	failOnError(err, fmt.Sprintf("Não foi possível carregar a chave privada do msreserva de %s", privateKeyPath))
+	log.Println("Chave privada do msreserva carregada com sucesso.")
 
-	// Carregar chave pública do microserviço msbilhete
-	msbilhetePublicKeyPath := "/app/certs/msbilhete/public_key.pem"
-	if _, err := os.Stat(msbilhetePublicKeyPath); os.IsNotExist(err) {
+	msbilhetePublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSBILHETE")
+	if msbilhetePublicKeyPath == "" {
 		msbilhetePublicKeyPath = "certificates/msbilhete/public_key.pem"
+		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
+			msbilhetePublicKeyPath = "/app/certs/msbilhete/public_key.pem"
+		}
 	}
-
 	msbilhetePublicKey, err = loadPublicKey(msbilhetePublicKeyPath)
-	if err != nil {
-		log.Fatalf("Não foi possível carregar a chave pública do msbilhete: %v", err)
-	} else {
-		log.Println("Chave pública do msbilhete carregada com sucesso")
-	}
+	failOnError(err, fmt.Sprintf("Não foi possível carregar a chave pública do msbilhete de %s", msbilhetePublicKeyPath))
+	log.Println("Chave pública do msbilhete carregada com sucesso.")
 
-	// Carregar chave pública do microserviço mspagamento
-	mspagamentoPublicKeyPath := "/app/certs/mspagamento/public_key.pem"
-	if _, err := os.Stat(mspagamentoPublicKeyPath); os.IsNotExist(err) {
+	mspagamentoPublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSPAGAMENTO")
+	if mspagamentoPublicKeyPath == "" {
 		mspagamentoPublicKeyPath = "certificates/mspagamento/public_key.pem"
+		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
+			mspagamentoPublicKeyPath = "/app/certs/mspagamento/public_key.pem"
+		}
 	}
-
 	mspagamentoPublicKey, err = loadPublicKey(mspagamentoPublicKeyPath)
-	if err != nil {
-		log.Fatalf("Não foi possível carregar a chave pública do mspagamento: %v", err)
-	} else {
-		log.Println("Chave pública do mspagamento carregada com sucesso")
-	}
+	failOnError(err, fmt.Sprintf("Não foi possível carregar a chave pública do mspagamento de %s", mspagamentoPublicKeyPath))
+	log.Println("Chave pública do mspagamento carregada com sucesso.")
 }
 
-// Função para verificar se uma chave pública corresponde a uma chave privada
 func validateKeyPair(publicKey *rsa.PublicKey, privateKey *rsa.PrivateKey) bool {
-	// Comparação direta dos componentes da chave
 	return publicKey.N.Cmp(privateKey.N) == 0 && publicKey.E == privateKey.E
 }
 
-// Função para converter chave pública para formato PEM
 func publicKeyToPEM(publicKey *rsa.PublicKey) (string, error) {
 	publicKeyBytes, err := x509.MarshalPKIXPublicKey(publicKey)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("falha ao serializar chave pública para PKIX: %w", err)
 	}
-
 	publicKeyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PUBLIC KEY",
 		Bytes: publicKeyBytes,
 	})
-
 	return string(publicKeyPEM), nil
 }
 
-// Função para converter string PEM para chave pública
 func pemToPublicKey(pemStr string) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode([]byte(pemStr))
 	if block == nil {
 		return nil, fmt.Errorf("falha ao decodificar PEM da chave pública")
 	}
-
 	publicKeyInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("falha ao parsear chave pública PKIX do PEM: %w", err)
 	}
-
 	publicKey, ok := publicKeyInterface.(*rsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("chave não é do tipo RSA Public Key")
+		return nil, fmt.Errorf("chave PEM não é do tipo RSA Public Key")
 	}
-
 	return publicKey, nil
 }
 
-func setupRabbitMQ() {
-	var err error
+func setupRabbitMQ(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+	log.Println("Iniciando configuração RabbitMQ para msreserva...")
 
-	// Tenta conectar ao RabbitMQ com retry
-	for i := 0; i < 5; i++ {
-		conn, err = amqp.Dial("amqp://guest:guest@localhost:5672/")
-		if err == nil {
-			break
-		}
-		log.Printf("Falha ao conectar ao RabbitMQ, tentando novamente em 5 segundos...")
-		time.Sleep(5 * time.Second)
+	rabbitMQURL := os.Getenv("RABBITMQ_URL")
+	if rabbitMQURL == "" {
+		rabbitMQURL = "amqp://guest:guest@localhost:5672/"
 	}
-	failOnError(err, "Falha ao conectar ao RabbitMQ")
 
-	ch, err = conn.Channel()
-	failOnError(err, "Falha ao abrir canal")
+	var err error
+	maxRetries := 10
+	retryDelay := 5 * time.Second
 
-	err = ch.ExchangeDeclare(
-		"reserva_criada",
-		"fanout",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Falha ao declarar fila de reservas")
-
-	pa, err = ch.QueueDeclare(
-		"pagamento_aprovado",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Falha ao declarar fila de pagamentos aprovados")
-
-	pr, err = ch.QueueDeclare(
-		"pagamento_recusado",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Falha ao declarar fila de pagamentos recusados")
-
-	bg, err = ch.QueueDeclare(
-		"bilhete_gerado",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Falha ao declarar fila de bilhete gerados")
-
-	msgsPagamentosAprovados, err := ch.Consume(
-		pa.Name,
-		"",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Falha ao registrar consumidor de pagamentos aprovados")
-
-	var forever chan struct{}
-
-	go func() {
-		for msg := range msgsPagamentosAprovados {
-			log.Printf("Recebido pagamento aprovado: %s", msg.Body)
-
-			// Verificar se há uma chave pública nos headers
-			var receivedPublicKeyPEM string
-			var ok bool
-
-			if receivedPublicKeyPEM, ok = msg.Headers["key"].(string); !ok {
-				log.Printf("Chave pública não encontrada nos headers, rejeitando mensagem")
-				msg.Nack(false, false) // Rejeitar mensagem sem requeue
-				continue
-			}
-
-			// Converter PEM para chave pública
-			receivedPublicKey, err := pemToPublicKey(receivedPublicKeyPEM)
-			if err != nil {
-				log.Printf("Erro ao converter PEM para chave pública: %v", err)
-				msg.Nack(false, false)
-				continue
-			}
-
-			// Validar se a chave pública recebida corresponde à chave privada do msreserva
-			if !validateKeyPair(receivedPublicKey, privateKey) {
-				log.Printf("A chave pública recebida não corresponde à chave privada do msreserva")
-				msg.Nack(false, true)
-				continue
-			}
-
-			log.Printf("Chave pública validada com sucesso, processando pagamento aprovado")
-
-			// Processar a mensagem
-			var paymentResponse model.PaymentResponse
-			if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
-				log.Printf("Erro ao decodificar mensagem de pagamento: %s", err)
-				msg.Nack(false, false)
-				continue
-			}
-
-			fmt.Println(paymentResponse)
-
-			msg.Ack(false)
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			log.Println("Contexto de setup RabbitMQ cancelado.")
+			return
+		default:
 		}
-	}()
-	<-forever
+
+		amqpConnection, err = amqp.Dial(rabbitMQURL)
+		if err == nil {
+			log.Println("msreserva: Conectado ao RabbitMQ com sucesso.")
+			amqpChannel, err = amqpConnection.Channel()
+			failOnError(err, "msreserva: Falha ao abrir canal principal para publicações")
+
+			err = amqpChannel.ExchangeDeclare(
+				exchangeReservaCriada, "fanout", true, false, false, false, nil)
+			failOnError(err, fmt.Sprintf("msreserva: Falha ao declarar exchange '%s'", exchangeReservaCriada))
+			log.Printf("msreserva: Exchange '%s' (fanout) declarada.", exchangeReservaCriada)
+
+			wg.Add(3)
+			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoAprovado, filaConsumoPagamentosAprovados, handlePagamentoAprovado)
+			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoRecusado, filaConsumoPagamentosRecusados, handlePagamentoRecusado)
+			go consumeMessages(ctx, wg, amqpConnection, exchangeBilheteGerado, filaConsumoBilhetesGerados, handleBilheteGerado)
+
+			go func() {
+				<-ctx.Done()
+				if amqpChannel != nil {
+					log.Println("msreserva: Fechando canal AMQP principal...")
+					amqpChannel.Close()
+				}
+				if amqpConnection != nil {
+					log.Println("msreserva: Fechando conexão AMQP principal...")
+					amqpConnection.Close()
+				}
+			}()
+			return
+		}
+		log.Printf("msreserva: Falha ao conectar ao RabbitMQ (tentativa %d/%d): %v. Tentando novamente em %v...", i+1, maxRetries, err, retryDelay)
+		time.Sleep(retryDelay)
+	}
+	failOnError(err, "msreserva: Falha ao conectar ao RabbitMQ após múltiplas tentativas")
+}
+
+func consumeMessages(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connection, exchangeName, queueName string, handlerFunc func(msg amqp.Delivery) error) {
+	defer wg.Done()
+	log.Printf("Iniciando consumidor para exchange '%s', fila de consumo '%s'", exchangeName, queueName)
+
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Printf("Erro ao abrir canal para consumidor da exchange '%s': %v", exchangeName, err)
+		return
+	}
+	defer ch.Close()
+
+	err = ch.ExchangeDeclare(exchangeName, "fanout", true, false, false, false, nil)
+	if err != nil {
+		log.Printf("Erro ao declarar exchange '%s' para consumidor: %v", exchangeName, err)
+		return
+	}
+
+	q, err := ch.QueueDeclare(queueName, true, false, false, false, nil)
+	if err != nil {
+		log.Printf("Erro ao declarar fila de consumo '%s': %v", queueName, err)
+		return
+	}
+
+	err = ch.QueueBind(q.Name, "", exchangeName, false, nil)
+	if err != nil {
+		log.Printf("Erro ao vincular fila '%s' à exchange '%s': %v", q.Name, exchangeName, err)
+		return
+	}
+	log.Printf("Fila de consumo '%s' vinculada à exchange '%s'", q.Name, exchangeName)
+
+	err = ch.Qos(1, 0, false)
+	if err != nil {
+		log.Printf("Erro ao configurar QoS para fila '%s': %v", queueName, err)
+		return
+	}
+
+	consumerTag := fmt.Sprintf("consumer-%s-%s-%d", exchangeName, queueName, time.Now().UnixNano())
+	msgs, err := ch.Consume(q.Name, consumerTag, false, false, false, false, nil)
+	if err != nil {
+		log.Printf("Erro ao registrar consumidor para fila '%s': %v", queueName, err)
+		return
+	}
+	log.Printf("Consumidor '%s' para fila '%s' (exchange '%s') iniciado.", consumerTag, q.Name, exchangeName)
+
+	chErrors := make(chan *amqp.Error)
+	ch.NotifyClose(chErrors)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Contexto cancelado para consumidor da fila '%s'. Encerrando...", queueName)
+			if errCancel := ch.Cancel(consumerTag, false); errCancel != nil {
+				log.Printf("Erro ao cancelar consumidor '%s': %v", consumerTag, errCancel)
+			}
+			return
+		case errClose, ok := <-chErrors:
+			if !ok || errClose != nil {
+				log.Printf("Canal AMQP para consumidor da fila '%s' fechado (erro: %v, ok: %t).", queueName, errClose, ok)
+			}
+			return
+		case d, ok := <-msgs:
+			if !ok {
+				log.Printf("Canal de entregas (msgs) para fila '%s' foi fechado.", queueName)
+				return
+			}
+			log.Printf("Recebida mensagem na fila '%s' (DeliveryTag: %d) da exchange '%s'", queueName, d.DeliveryTag, exchangeName)
+
+			var receivedPublicKeyPEM string
+			var keyOk bool
+			if headerKey, headerExists := d.Headers["key"]; headerExists {
+				receivedPublicKeyPEM, keyOk = headerKey.(string)
+			}
+			if !keyOk {
+				log.Printf("Chave pública não encontrada ou tipo inválido nos headers para DeliveryTag: %d na fila '%s'. Rejeitando.", d.DeliveryTag, queueName)
+				d.Nack(false, false)
+				continue
+			}
+			receivedPublicKey, errKey := pemToPublicKey(receivedPublicKeyPEM)
+			if errKey != nil {
+				log.Printf("Erro ao converter PEM para chave pública para DeliveryTag: %d na fila '%s': %v. Rejeitando.", d.DeliveryTag, queueName, errKey)
+				d.Nack(false, false)
+				continue
+			}
+			if !validateKeyPair(receivedPublicKey, privateKey) {
+				log.Printf("Chave pública recebida no header não corresponde à chave privada do msreserva para DeliveryTag: %d na fila '%s'. Rejeitando.", d.DeliveryTag, queueName)
+				d.Nack(false, false)
+				continue
+			}
+			log.Printf("Chave pública (do destinatário msreserva) validada com sucesso para DeliveryTag: %d na fila '%s'.", d.DeliveryTag, queueName)
+
+			if errHandler := handlerFunc(d); errHandler != nil {
+				log.Printf("Erro no handler para DeliveryTag: %d na fila '%s': %v", d.DeliveryTag, queueName, errHandler)
+				d.Nack(false, false)
+			} else {
+				d.Ack(false)
+				log.Printf("Mensagem (DeliveryTag: %d) da fila '%s' processada e confirmada com sucesso.", d.DeliveryTag, queueName)
+			}
+		}
+	}
+}
+
+func handlePagamentoAprovado(msg amqp.Delivery) error {
+	log.Printf("Handler: Pagamento Aprovado recebido: %s", msg.Body)
+	var paymentResponse model.PaymentResponse
+	if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
+		return fmt.Errorf("erro ao decodificar JSON de pagamento aprovado: %w", err)
+	}
+	log.Printf("Pagamento aprovado para ReservationID: %s. Aguardando bilhete.", paymentResponse.ReservationID)
+	return nil
+}
+
+func handlePagamentoRecusado(msg amqp.Delivery) error {
+	log.Printf("Handler: Pagamento Recusado recebido: %s", msg.Body)
+	var paymentResponse model.PaymentResponse
+	if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
+		return fmt.Errorf("erro ao decodificar JSON de pagamento recusado: %w", err)
+	}
+
+	mu.Lock()
+	if resultChan, ok := paymentResults[paymentResponse.ReservationID]; ok {
+		select {
+		case resultChan <- paymentResponse:
+			log.Printf("Notificado HTTP handler sobre pagamento recusado para ReservationID: %s", paymentResponse.ReservationID)
+		default:
+			log.Printf("Não foi possível enviar resultado de pagamento recusado para ReservationID %s: canal de resposta bloqueado ou fechado.", paymentResponse.ReservationID)
+		}
+	} else {
+		log.Printf("Nenhum HTTP handler aguardando por resultado de pagamento recusado para ReservationID: %s", paymentResponse.ReservationID)
+	}
+	mu.Unlock()
+	log.Printf("Cancelando reserva (simulado) para ReservationID: %s devido a pagamento recusado.", paymentResponse.ReservationID)
+	return nil
+}
+
+func handleBilheteGerado(msg amqp.Delivery) error {
+	log.Printf("Handler: Bilhete Gerado recebido: %s", msg.Body)
+	var bilheteResponse model.BilheteResponse
+	if err := json.Unmarshal(msg.Body, &bilheteResponse); err != nil {
+		return fmt.Errorf("erro ao decodificar JSON de bilhete gerado: %w", err)
+	}
+
+	mu.Lock()
+	if respChan, ok := responses[bilheteResponse.ReservationID]; ok {
+		select {
+		case respChan <- bilheteResponse:
+			log.Printf("Enviado bilhete para HTTP handler para ReservationID: %s", bilheteResponse.ReservationID)
+		default:
+			log.Printf("Não foi possível enviar bilhete para ReservationID %s: canal de resposta bloqueado ou fechado.", bilheteResponse.ReservationID)
+		}
+	} else {
+		log.Printf("Nenhum HTTP handler aguardando por bilhete para ReservationID: %s", bilheteResponse.ReservationID)
+	}
+	mu.Unlock()
+	return nil
+}
+
+// Handler para listar todos os cruzeiros
+func listCruisesHandler(c echo.Context) error {
+	log.Println("Recebida requisição para listar cruzeiros.")
+	if listaDeCruzeiros == nil {
+		log.Println("Lista de cruzeiros não carregada.")
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Dados de cruzeiros não disponíveis."})
+	}
+	return c.JSON(http.StatusOK, listaDeCruzeiros)
+}
+
+// Handler para obter detalhes de um cruzeiro específico
+func getCruiseDetailsHandler(c echo.Context) error {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		log.Printf("ID de cruzeiro inválido recebido: %s", idStr)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ID de cruzeiro inválido"})
+	}
+	log.Printf("Recebida requisição para detalhes do cruzeiro ID: %d", id)
+
+	for _, cruzeiro := range listaDeCruzeiros {
+		if cruzeiro.ID == id {
+			return c.JSON(http.StatusOK, cruzeiro)
+		}
+	}
+	log.Printf("Cruzeiro com ID: %d não encontrado.", id)
+	return c.JSON(http.StatusNotFound, map[string]string{"error": "Cruzeiro não encontrado"})
 }
 
 func createReservationHandler(c echo.Context) error {
-
-	fmt.Println("Entrou na rota de reserva")
+	if amqpChannel == nil || amqpConnection == nil || amqpConnection.IsClosed() {
+		log.Println("Conexão/Canal AMQP não está pronto para createReservationHandler.")
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Serviço de mensageria indisponível"})
+	}
 
 	var request model.ReservationRequest
 	if err := c.Bind(&request); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "Dados inválidos para reserva",
-		})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Dados inválidos para reserva"})
 	}
 
-	// Validar dados da reserva
-	if request.CruiseID == "" || request.Customer == "" || request.Passengers <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "Dados incompletos para reserva",
-		})
+	if request.CruiseID == "" { // O ID do cruzeiro deve ser fornecido
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ID do cruzeiro é obrigatório"})
+	}
+	if request.Customer == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Nome do cliente é obrigatório"})
+	}
+	if request.Passengers <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Número de passageiros deve ser maior que zero"})
 	}
 
-	reservaID := uuid.New().String()
+	request.ReservationID = uuid.New().String()
+	log.Printf("Criando reserva com ID: %s para cruzeiro ID: %s", request.ReservationID, request.CruiseID)
 
-	request.ReservationID = reservaID
+	bilheteResponseChan := make(chan model.BilheteResponse, 1)
+	pagamentoRecusadoChan := make(chan model.PaymentResponse, 1)
 
-	// Preparar mensagem
+	mu.Lock()
+	responses[request.ReservationID] = bilheteResponseChan
+	paymentResults[request.ReservationID] = pagamentoRecusadoChan
+	mu.Unlock()
+
+	defer func() {
+		mu.Lock()
+		delete(responses, request.ReservationID)
+		delete(paymentResults, request.ReservationID)
+		mu.Unlock()
+		log.Printf("Canais de resposta para ReservationID %s limpos.", request.ReservationID)
+	}()
+
 	body, err := json.Marshal(request)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "Erro ao processar requisição",
-		})
+		log.Printf("Erro ao codificar JSON da requisição de reserva %s: %v", request.ReservationID, err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao processar requisição"})
 	}
 
-	mspagamentoKeyPEM, err := publicKeyToPEM(mspagamentoPublicKey)
+	mspagamentoKeyPem, err := publicKeyToPEM(mspagamentoPublicKey)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "Erro ao serializar chave pública",
-		})
+		log.Printf("Erro ao converter chave pública do mspagamento para PEM para reserva %s: %v", request.ReservationID, err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao serializar chave pública do mspagamento"})
 	}
 
-	// Publicar mensagem
-	err = ch.Publish(
-		"",               // exchange
-		"reserva_criada", // routing key
-		false,            // mandatory
-		false,            // immediate
+	err = amqpChannel.Publish(
+		exchangeReservaCriada,
+		"",
+		false,
+		false,
 		amqp.Publishing{
 			DeliveryMode: amqp.Persistent,
 			ContentType:  "application/json",
 			Body:         body,
-			Headers: amqp.Table{
-				"key": mspagamentoKeyPEM,
-			},
+			Headers:      amqp.Table{"key": mspagamentoKeyPem},
 		})
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "Erro ao enviar mensagem",
-		})
+		log.Printf("Erro ao publicar mensagem na exchange '%s' para %s: %v", exchangeReservaCriada, request.ReservationID, err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao enviar mensagem de reserva"})
 	}
+	log.Printf("Mensagem de reserva criada para %s publicada com sucesso na exchange '%s'.", request.ReservationID, exchangeReservaCriada)
 
-	msgsPagamentosRecusados, err := ch.Consume(
-		pr.Name,
-		"",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Falha ao registrar consumidor de pagamentos recusados")
-
-	msgsBilhetesGerados, err := ch.Consume(
-		bg.Name,
-		"",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Falha ao registrar consumidor de bilhetes gerados")
-
-	var wg sync.WaitGroup
-
-	// Criar canal para receber o bilhete
-	bilheteResponseChan := make(chan model.BilheteResponse, 1)
-	// Canal para sinalizar erro de pagamento recusado
-	pagamentoRecusadoChan := make(chan bool, 1)
-
-	fmt.Println("Entrou na goroutine de processamento")
-	// Adiciona 1 ao contador do WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case msg := <-msgsPagamentosRecusados:
-				log.Printf("Recebido pagamento recusado: %s", msg.Body)
-				var ok bool
-				// Verificar se há uma chave pública nos headers
-				var receivedPublicKeyPEM string
-
-				if receivedPublicKeyPEM, ok = msg.Headers["key"].(string); !ok {
-					log.Printf("Chave pública não encontrada nos headers, rejeitando mensagem")
-					msg.Nack(false, false) // Rejeitar mensagem sem requeue
-					continue
-				}
-
-				// Converter PEM para chave pública
-				receivedPublicKey, err := pemToPublicKey(receivedPublicKeyPEM)
-				if err != nil {
-					log.Printf("Erro ao converter PEM para chave pública: %v", err)
-					msg.Nack(false, false)
-					continue
-				}
-
-				// Validar se a chave pública recebida corresponde à chave privada do msreserva
-				if !validateKeyPair(receivedPublicKey, privateKey) {
-					log.Printf("A chave pública recebida não corresponde à chave privada do msreserva, rejeitando mensagem")
-					msg.Nack(false, false)
-					continue
-				}
-
-				log.Printf("Chave pública validada com sucesso, processando pagamento recusado")
-
-				// Processar a mensagem
-				var paymentResponse model.PaymentResponse
-				if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
-					log.Printf("Erro ao decodificar mensagem de pagamento: %s", err)
-					msg.Nack(false, false)
-					continue
-				}
-
-				fmt.Println(paymentResponse)
-				msg.Ack(false)
-
-				// Sinalizar que o pagamento foi recusado
-				pagamentoRecusadoChan <- true
-				return // Encerra a goroutine
-
-			case msg := <-msgsBilhetesGerados:
-				log.Printf("Recebido bilhete gerado: %s", msg.Body)
-
-				// Verificar se há uma chave pública nos headers
-				var receivedPublicKeyPEM string
-				var ok bool
-
-				if receivedPublicKeyPEM, ok = msg.Headers["key"].(string); !ok {
-					log.Printf("Chave pública não encontrada nos headers, rejeitando mensagem")
-					msg.Nack(false, false) // Rejeitar mensagem sem requeue
-					continue
-				}
-
-				// Converter PEM para chave pública
-				receivedPublicKey, err := pemToPublicKey(receivedPublicKeyPEM)
-				if err != nil {
-					log.Printf("Erro ao converter PEM para chave pública: %v", err)
-					msg.Nack(false, false)
-					continue
-				}
-
-				// Validar se a chave pública recebida corresponde à chave privada do msreserva
-				if !validateKeyPair(receivedPublicKey, privateKey) {
-					log.Printf("A chave pública recebida não corresponde à chave privada do msreserva, rejeitando mensagem")
-					msg.Nack(false, false)
-					continue
-				}
-
-				log.Printf("Chave pública validada com sucesso, processando bilhete gerado")
-
-				// Processar a mensagem
-				var bilheteResponse model.BilheteResponse
-				if err := json.Unmarshal(msg.Body, &bilheteResponse); err != nil {
-					log.Printf("Erro ao decodificar mensagem de bilhete: %s", err)
-					msg.Nack(false, false)
-					continue
-				}
-				msg.Ack(false)
-
-				// Enviar o bilhete pelo canal
-				bilheteResponseChan <- bilheteResponse
-				return // Encerra a goroutine
-			}
-		}
-	}()
-
-	// Aguardar a conclusão da goroutine ou timeout
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	// Definir timeout de 30 segundos para a operação
-	timeout := time.After(30 * time.Second)
-
-	// Aguardar por um dos eventos: bilhete gerado, pagamento recusado ou timeout
 	select {
-	case bilheteResponse := <-bilheteResponseChan:
-		fmt.Println("Bilhete recebido com sucesso")
-		return c.JSON(http.StatusOK, bilheteResponse)
-	case <-pagamentoRecusadoChan:
-		fmt.Println("Pagamento recusado")
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "Pagamento recusado para esta reserva",
+	case bilhete := <-bilheteResponseChan:
+		log.Printf("Bilhete recebido para ReservationID %s via HTTP handler.", bilhete.ReservationID)
+		return c.JSON(http.StatusOK, bilhete)
+	case pagamento := <-pagamentoRecusadoChan:
+		log.Printf("Pagamento recusado para ReservationID %s via HTTP handler.", pagamento.ReservationID)
+		return c.JSON(http.StatusAccepted, map[string]string{
+			"status":  pagamento.Status,
+			"message": pagamento.Message,
+			"details": fmt.Sprintf("Pagamento para reserva %s foi recusado.", pagamento.ReservationID),
 		})
-	case <-timeout:
-		fmt.Println("Timeout ao aguardar resposta")
-		return c.JSON(http.StatusRequestTimeout, map[string]string{
-			"error": "Timeout ao processar a reserva",
-		})
-	case <-done:
-		fmt.Println("Processamento concluído sem resposta válida")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "Não foi possível processar a reserva",
-		})
+	case <-time.After(30 * time.Second):
+		log.Printf("Timeout ao aguardar resposta para ReservationID %s.", request.ReservationID)
+		return c.JSON(http.StatusRequestTimeout, map[string]string{"error": "Timeout ao processar a reserva"})
 	}
 }
 
 func main() {
-
+	log.Println("Iniciando microserviço de reservas...")
 	loadCertificates()
 
-	go setupRabbitMQ()
-	defer conn.Close()
-	defer ch.Close()
+	cruzeirosFilePath := "data/cruzeiros.json"
+	if cruzeirosFilePath == "" {
+		cruzeirosFilePath = "cruzeiros.json"
+		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
+			cruzeirosFilePath = "/app/cruzeiros.json"
+		}
+	}
+	errLoad := loadCruzeirosData(cruzeirosFilePath)
+	failOnError(errLoad, fmt.Sprintf("Falha ao carregar dados dos cruzeiros de %s", cruzeirosFilePath))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go setupRabbitMQ(ctx, &wg)
 
 	e := echo.New()
-
-	// Middleware
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
-	e.Use(middleware.CORS())
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{ // Configuração CORS mais explícita
+		AllowOrigins: []string{"*"}, // Em produção, restrinja isso!
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+	}))
 
-	// Rotas
+	e.GET("/cruzeiros", listCruisesHandler)
+	e.GET("/cruzeiros/:id", getCruiseDetailsHandler)
+
 	e.POST("/reservations", createReservationHandler)
 
-	fmt.Println("Servidor de reservas iniciado na porta 8080")
-	e.Logger.Fatal(e.Start(":8080"))
+	go func() {
+		httpPort := os.Getenv("HTTP_PORT_MSRESERVA")
+		if httpPort == "" {
+			httpPort = "8080"
+		}
+		log.Printf("Servidor de reservas HTTP escutando na porta %s", httpPort)
+		if err := e.Start(":" + httpPort); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Erro ao iniciar servidor HTTP: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Recebido sinal de encerramento, iniciando shutdown gracioso...")
+
+	cancel()
+
+	shutdownCtxHttp, shutdownCancelHttp := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancelHttp()
+	if err := e.Shutdown(shutdownCtxHttp); err != nil {
+		log.Printf("Erro no shutdown do servidor HTTP: %v", err)
+	} else {
+		log.Println("Servidor HTTP encerrado.")
+	}
+
+	log.Println("Aguardando todas as goroutines RabbitMQ terminarem...")
+	wgDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(wgDone)
+	}()
+
+	select {
+	case <-wgDone:
+		log.Println("Todas as goroutines RabbitMQ terminaram.")
+	case <-time.After(15 * time.Second):
+		log.Println("Timeout esperando goroutines RabbitMQ.")
+	}
+	log.Println("Microserviço de reservas encerrado.")
 }
