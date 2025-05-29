@@ -149,6 +149,11 @@ async function handleReservation() {
       method: 'POST',
       body: payload,
     });
+    console.log("Resposta da reserva:", response);
+
+    if (response.status === 'failed') {
+      throw new Error(response.message || 'Falha ao processar a reserva.');
+    }
 
     reservationStatus.value = response.message || 'Reserva processada com sucesso!';
     reservationSuccess.value = true;
@@ -157,7 +162,6 @@ async function handleReservation() {
   } catch (err: any) {
     console.error("Erro na reserva:", err);
     if (err.response && err.response._data) {
-      // Se a API retorna um JSON de erro como { error: "mensagem", details?: "..." }
       const errorData = err.response._data;
       reservationStatus.value = errorData.details || errorData.error || errorData.message || 'Falha ao processar a reserva.';
     } else {

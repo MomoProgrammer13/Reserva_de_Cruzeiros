@@ -21,6 +21,7 @@ var microservices = []string{
 	"msreserva",
 	"mspagamento",
 	"msbilhete",
+	"msmarketing",
 }
 
 // Gera um par de chaves RSA para um microserviço específico

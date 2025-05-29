@@ -531,7 +531,7 @@ func main() {
 
 	cruzeirosFilePath := os.Getenv("CRUZEIROS_JSON_PATH")
 	if cruzeirosFilePath == "" {
-		cruzeirosFilePath = "cruzeiros.json"
+		cruzeirosFilePath = "data/cruzeiros.json"
 		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
 			cruzeirosFilePath = "/app/cruzeiros.json"
 		}

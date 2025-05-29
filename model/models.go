@@ -36,3 +36,13 @@ type BilheteResponse struct {
 	Message       string    `json:"message"`
 	IssuedAt      time.Time `json:"issuedAt"`
 }
+
+type Promocao struct {
+	ID           string    `json:"id,omitempty"`           // Identificador único da promoção (opcional, pode ser gerado pelo MSMarketing)
+	NomePromocao string    `json:"nomePromocao"`           // Nome chamativo da promoção
+	CruiseID     string    `json:"cruiseId"`               // ID do cruzeiro ao qual a promoção se aplica
+	Destino      string    `json:"destino,omitempty"`      // Destino para roteamento (MSMarketing ainda pode precisar disso)
+	Descricao    string    `json:"descricao,omitempty"`    // Uma breve descrição (opcional)
+	Timestamp    time.Time `json:"timestamp,omitempty"`    // Data e hora de criação/publicação da promoção
+	PublicadoPor string    `json:"publicadoPor,omitempty"` // Identificador de quem publicou (ex: msmarketing)
+}

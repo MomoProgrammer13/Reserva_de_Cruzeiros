@@ -179,7 +179,11 @@ func main() {
 	failOnError(err, "Falha ao abrir canal RabbitMQ")
 	defer ch.Close()
 
-	err = ch.ExchangeDeclare(exchangePagamentoAprovado, "fanout", true, false, false, false, nil)
+	err = ch.ExchangeDeclare(exchangePagamentoAprovado,
+		"fanout",
+		true, false,
+		false, false,
+		nil)
 	failOnError(err, fmt.Sprintf("Falha ao declarar exchange '%s'", exchangePagamentoAprovado))
 
 	qPagamento, err := ch.QueueDeclare(filaConsumoPagamentoAprovadoMsBilhete, true, false, false, false, nil)

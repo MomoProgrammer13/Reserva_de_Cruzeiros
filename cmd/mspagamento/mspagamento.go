@@ -9,14 +9,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/streadway/amqp"
 	"io/ioutil"
 	"log"
+	mathRand "math/rand"
 	"os"
 	"reserva-cruzeiros/model"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/streadway/amqp"
 )
 
 var (
@@ -136,7 +136,7 @@ func verifySignature(message, signature []byte, publicKey *rsa.PublicKey) error 
 
 func processPayment(request model.ReservationRequest) (model.PaymentResponse, bool) {
 	paymentID := uuid.New().String()
-	valid := true // Simulação, aprova todos
+	valid := mathRand.Intn(5) != 0
 	if !valid {
 		log.Printf("Pagamento recusado para ReservationID: %s", request.ReservationID)
 		return model.PaymentResponse{
@@ -165,7 +165,7 @@ func processPayment(request model.ReservationRequest) (model.PaymentResponse, bo
 func main() {
 	log.Println("Iniciando microserviço de pagamento...")
 	loadCertificates()
-
+	mathRand.Seed(time.Now().UnixNano())
 	rabbitMQURL := os.Getenv("RABBITMQ_URL")
 	if rabbitMQURL == "" {
 		rabbitMQURL = "amqp://guest:guest@localhost:5672/"
@@ -192,19 +192,46 @@ func main() {
 	failOnError(err, "Falha ao abrir canal RabbitMQ")
 	defer ch.Close()
 
-	err = ch.ExchangeDeclare(exchangeReservaCriada, "fanout", true, false, false, false, nil)
+	err = ch.ExchangeDeclare(exchangeReservaCriada,
+		"fanout",
+		true,
+		false,
+		false,
+		false,
+		nil)
 	failOnError(err, fmt.Sprintf("Falha ao declarar exchange '%s'", exchangeReservaCriada))
 
-	qReservas, err := ch.QueueDeclare(filaConsumoReservasCriadas, true, false, false, false, nil)
+	qReservas, err := ch.QueueDeclare(filaConsumoReservasCriadas,
+		true,
+		false,
+		false,
+		false,
+		nil)
 	failOnError(err, fmt.Sprintf("Falha ao declarar fila de consumo '%s'", filaConsumoReservasCriadas))
 
-	err = ch.QueueBind(qReservas.Name, "", exchangeReservaCriada, false, nil)
+	err = ch.QueueBind(qReservas.Name,
+		"",
+		exchangeReservaCriada,
+		false,
+		nil)
 	failOnError(err, fmt.Sprintf("Falha ao vincular fila '%s' à exchange '%s'", qReservas.Name, exchangeReservaCriada))
 	log.Printf("Fila de consumo '%s' vinculada à exchange '%s'", qReservas.Name, exchangeReservaCriada)
 
-	err = ch.ExchangeDeclare(exchangePagamentoAprovado, "fanout", true, false, false, false, nil)
+	err = ch.ExchangeDeclare(exchangePagamentoAprovado,
+		"fanout",
+		true,
+		false,
+		false,
+		false,
+		nil)
 	failOnError(err, fmt.Sprintf("Falha ao declarar exchange de publicação '%s'", exchangePagamentoAprovado))
-	err = ch.ExchangeDeclare(exchangePagamentoRecusado, "fanout", true, false, false, false, nil)
+	err = ch.ExchangeDeclare(exchangePagamentoRecusado,
+		"fanout",
+		true,
+		false,
+		false,
+		false,
+		nil)
 	failOnError(err, fmt.Sprintf("Falha ao declarar exchange de publicação '%s'", exchangePagamentoRecusado))
 	log.Printf("Exchanges de publicação '%s' e '%s' (fanout) declaradas.", exchangePagamentoAprovado, exchangePagamentoRecusado)
 
