@@ -1,84 +1,48 @@
 package main
 
 import (
-	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
+	"bytes"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"reserva-cruzeiros/model" // Certifique-se que este path está correto
-	"strconv"
-	"sync"
-	"syscall"
-	"time"
-
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/streadway/amqp"
+	"log"
+	"net/http"
+	"os"
+	"reserva-cruzeiros/model"
+	"sync"
 )
 
-// Estrutura para representar os dados de um cruzeiro, correspondendo ao cruzeiros.json
-type Cruzeiro struct {
-	ID                 int      `json:"id"`
-	Nome               string   `json:"nome"`
-	Empresa            string   `json:"empresa"`
-	Itinerario         []string `json:"itinerario"`
-	PortoEmbarque      string   `json:"portoEmbarque"`
-	PortoDesembarque   string   `json:"portoDesembarque"`
-	DataEmbarque       string   `json:"dataEmbarque"`
-	DataDesembarque    string   `json:"dataDesembarque"`
-	CabinesDisponiveis int      `json:"cabinesDisponiveis"`
-	ValorCabine        float64  `json:"valorCabine"`
-	ImagemURL          string   `json:"imagemURL"`
-	DescricaoDetalhada string   `json:"descricaoDetalhada"`
+// Estrutura para gerenciar clientes SSE
+type SseClient struct {
+	channel           chan string
+	interestedInPromo bool
 }
 
 var (
-	// Chave privada deste microsserviço (MSReserva)
-	msReservaPrivateKey *rsa.PrivateKey
-	// Chaves públicas dos outros microsserviços dos quais MSReserva consome mensagens
-	msPagamentoPublicKey *rsa.PublicKey
-	msBilhetePublicKey   *rsa.PublicKey
-
-	listaDeCruzeiros []Cruzeiro
+	clients   = make(map[string]*SseClient)
+	clientsMu sync.RWMutex
+	// Cache para reservas em andamento para o cancelamento
+	activeReservations = make(map[string]model.ReservationCreatedEvent)
+	reservationsMutex  sync.Mutex
 )
 
-var (
-	responses      = make(map[string]chan model.BilheteResponse)
-	paymentResults = make(map[string]chan model.PaymentResponse)
-	mu             sync.Mutex
-)
-
-var amqpConnection *amqp.Connection
 var amqpChannel *amqp.Channel
 
+// Nomes das filas e exchanges
 const (
-	exchangeReservaCriada     = "reserva_criada"
-	exchangePagamentoAprovado = "pagamento_aprovado"
-	exchangePagamentoRecusado = "pagamento_recusado"
-	exchangeBilheteGerado     = "bilhete_gerado"
-)
-
-const (
-	filaConsumoPagamentosAprovados = "msreserva_consumo_pagamento_aprovado"
-	filaConsumoPagamentosRecusados = "msreserva_consumo_pagamento_recusado"
-	filaConsumoBilhetesGerados     = "msreserva_consumo_bilhete_gerado"
-)
-
-const (
-	senderIDMSReserva   = "msreserva"
-	senderIDMSPagamento = "mspagamento"
-	senderIDMSBilhete   = "msbilhete"
+	exchangeReservaCriada         = "reserva_criada"
+	exchangeReservaCancelada      = "reserva_cancelada"
+	exchangePagamentoAprovado     = "pagamento_aprovado"
+	exchangePagamentoRecusado     = "pagamento_recusado"
+	exchangeBilheteGerado         = "bilhete_gerado"
+	exchangePromocoes             = "promocoes"
+	queueConsumoPagamentoAprovado = "msreserva_consumo_pagamento_aprovado"
+	queueConsumoPagamentoRecusado = "msreserva_consumo_pagamento_recusado"
+	queueConsumoBilheteGerado     = "msreserva_consumo_bilhete_gerado"
+	queueConsumoPromocoes         = "msreserva_consumo_promocoes"
 )
 
 func failOnError(err error, msg string) {
@@ -87,515 +51,342 @@ func failOnError(err error, msg string) {
 	}
 }
 
-func loadCruzeirosData(filePath string) error {
-	data, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("falha ao ler arquivo de cruzeiros %s: %w", filePath, err)
-	}
-	err = json.Unmarshal(data, &listaDeCruzeiros)
-	if err != nil {
-		return fmt.Errorf("falha ao decodificar JSON de cruzeiros: %w", err)
-	}
-	log.Printf("%d cruzeiros carregados de %s", len(listaDeCruzeiros), filePath)
-	return nil
+// ---- Funções de Notificação SSE ----
+
+func formatSseMessage(event, data string) string {
+	return fmt.Sprintf("event: %s\ndata: %s\n\n", event, data)
 }
 
-func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
-	privateKeyData, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("falha ao ler chave privada de %s: %w", path, err)
-	}
-	block, _ := pem.Decode(privateKeyData)
-	if block == nil {
-		return nil, fmt.Errorf("falha ao decodificar PEM da chave privada de %s", path)
-	}
-	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("falha ao parsear chave privada PKCS1 de %s: %w", path, err)
-	}
-	return privateKey, nil
-}
-
-func loadPublicKey(path string) (*rsa.PublicKey, error) {
-	publicKeyData, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("falha ao ler chave pública de %s: %w", path, err)
-	}
-	block, _ := pem.Decode(publicKeyData)
-	if block == nil {
-		return nil, fmt.Errorf("falha ao decodificar PEM da chave pública de %s", path)
-	}
-	publicKeyInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("falha ao parsear chave pública PKIX de %s: %w", path, err)
-	}
-	publicKey, ok := publicKeyInterface.(*rsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("chave pública de %s não é do tipo RSA", path)
-	}
-	return publicKey, nil
-}
-
-func loadCertificates() {
-	var err error
-	// Carregar chave privada do MSReserva
-	privateKeyPath := os.Getenv("PRIVATE_KEY_PATH_MSRESERVA")
-	if privateKeyPath == "" {
-		privateKeyPath = "certificates/msreserva/private_key.pem"
-		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
-			privateKeyPath = "/app/certs/msreserva/private_key.pem"
+func broadcastToInterested(message string) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+	for id, client := range clients {
+		if client.interestedInPromo {
+			select {
+			case client.channel <- message:
+			default:
+				log.Printf("Canal do cliente %s (interessado em promo) bloqueado.", id)
+			}
 		}
 	}
-	msReservaPrivateKey, err = loadPrivateKey(privateKeyPath)
-	failOnError(err, fmt.Sprintf("MSReserva: Não foi possível carregar a chave privada de %s", privateKeyPath))
-	log.Println("MSReserva: Chave privada carregada com sucesso.")
+}
 
-	// Carregar chave pública do MSPagamento (para verificar mensagens de pagamento_aprovado/recusado)
-	msPagamentoPublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSPAGAMENTO")
-	if msPagamentoPublicKeyPath == "" {
-		msPagamentoPublicKeyPath = "certificates/mspagamento/public_key.pem"
-		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
-			msPagamentoPublicKeyPath = "/app/certs/mspagamento/public_key.pem"
+func notifyClient(clientID, message string) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+	if client, ok := clients[clientID]; ok {
+		select {
+		case client.channel <- message:
+		default:
+			log.Printf("Canal do cliente %s bloqueado.", clientID)
 		}
+	} else {
+		log.Printf("Cliente SSE com ID %s não encontrado para notificação.", clientID)
 	}
-	msPagamentoPublicKey, err = loadPublicKey(msPagamentoPublicKeyPath)
-	failOnError(err, fmt.Sprintf("MSReserva: Não foi possível carregar a chave pública do MSPagamento de %s", msPagamentoPublicKeyPath))
-	log.Println("MSReserva: Chave pública do MSPagamento carregada com sucesso.")
-
-	// Carregar chave pública do MSBilhete (para verificar mensagens de bilhete_gerado)
-	msBilhetePublicKeyPath := os.Getenv("PUBLIC_KEY_PATH_MSBILHETE")
-	if msBilhetePublicKeyPath == "" {
-		msBilhetePublicKeyPath = "certificates/msbilhete/public_key.pem"
-		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
-			msBilhetePublicKeyPath = "/app/certs/msbilhete/public_key.pem"
-		}
-	}
-	msBilhetePublicKey, err = loadPublicKey(msBilhetePublicKeyPath)
-	failOnError(err, fmt.Sprintf("MSReserva: Não foi possível carregar a chave pública do MSBilhete de %s", msBilhetePublicKeyPath))
-	log.Println("MSReserva: Chave pública do MSBilhete carregada com sucesso.")
 }
 
-// signMessage assina a mensagem usando a chave privada fornecida.
-func signMessage(message []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
-	hashed := sha256.Sum256(message)
-	signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, hashed[:])
-	if err != nil {
-		return nil, fmt.Errorf("erro ao assinar mensagem: %w", err)
-	}
-	return signature, nil
-}
+// ---- Configuração e Consumidores RabbitMQ ----
 
-// verifySignature verifica a assinatura da mensagem usando a chave pública fornecida.
-func verifySignature(message, signature []byte, publicKey *rsa.PublicKey) error {
-	hashed := sha256.Sum256(message)
-	err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, hashed[:], signature)
-	if err != nil {
-		return fmt.Errorf("falha na verificação da assinatura: %w", err)
-	}
-	return nil
-}
-
-func setupRabbitMQ(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-	log.Println("Iniciando configuração RabbitMQ para msreserva...")
-
+func setupRabbitMQ() {
 	rabbitMQURL := os.Getenv("RABBITMQ_URL")
 	if rabbitMQURL == "" {
 		rabbitMQURL = "amqp://guest:guest@localhost:5672/"
 	}
-
-	var err error
-	maxRetries := 10
-	retryDelay := 5 * time.Second
-
-	for i := 0; i < maxRetries; i++ {
-		select {
-		case <-ctx.Done():
-			log.Println("Contexto de setup RabbitMQ cancelado.")
-			return
-		default:
-		}
-
-		amqpConnection, err = amqp.Dial(rabbitMQURL)
-		if err == nil {
-			log.Println("msreserva: Conectado ao RabbitMQ com sucesso.")
-			amqpChannel, err = amqpConnection.Channel()
-			failOnError(err, "msreserva: Falha ao abrir canal principal para publicações")
-
-			err = amqpChannel.ExchangeDeclare(
-				exchangeReservaCriada, "fanout", true, false, false, false, nil)
-			failOnError(err, fmt.Sprintf("msreserva: Falha ao declarar exchange '%s'", exchangeReservaCriada))
-			log.Printf("msreserva: Exchange '%s' (fanout) declarada.", exchangeReservaCriada)
-
-			wg.Add(3)
-			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoAprovado, filaConsumoPagamentosAprovados, handlePagamentoAprovado, msPagamentoPublicKey, senderIDMSPagamento)
-			go consumeMessages(ctx, wg, amqpConnection, exchangePagamentoRecusado, filaConsumoPagamentosRecusados, handlePagamentoRecusado, msPagamentoPublicKey, senderIDMSPagamento)
-			go consumeMessages(ctx, wg, amqpConnection, exchangeBilheteGerado, filaConsumoBilhetesGerados, handleBilheteGerado, msBilhetePublicKey, senderIDMSBilhete)
-
-			go func() {
-				<-ctx.Done()
-				if amqpChannel != nil {
-					log.Println("msreserva: Fechando canal AMQP principal...")
-					amqpChannel.Close()
-				}
-				if amqpConnection != nil {
-					log.Println("msreserva: Fechando conexão AMQP principal...")
-					amqpConnection.Close()
-				}
-			}()
-			return
-		}
-		log.Printf("msreserva: Falha ao conectar ao RabbitMQ (tentativa %d/%d): %v. Tentando novamente em %v...", i+1, maxRetries, err, retryDelay)
-		time.Sleep(retryDelay)
-	}
-	failOnError(err, "msreserva: Falha ao conectar ao RabbitMQ após múltiplas tentativas")
-}
-
-func consumeMessages(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connection, exchangeName, queueName string, handlerFunc func(msg amqp.Delivery) error, expectedSenderPublicKey *rsa.PublicKey, expectedSenderID string) {
-	defer wg.Done()
-	log.Printf("Iniciando consumidor para exchange '%s', fila de consumo '%s', esperando remetente '%s'", exchangeName, queueName, expectedSenderID)
+	conn, err := amqp.Dial(rabbitMQURL)
+	failOnError(err, "Falha ao conectar ao RabbitMQ")
 
 	ch, err := conn.Channel()
-	if err != nil {
-		log.Printf("Erro ao abrir canal para consumidor da exchange '%s': %v", exchangeName, err)
-		return
-	}
-	defer ch.Close()
+	failOnError(err, "Falha ao abrir canal")
+	amqpChannel = ch
+
+	// Exchanges para publicação
+	err = ch.ExchangeDeclare(exchangeReservaCriada, "fanout", true, false, false, false, nil)
+	failOnError(err, "Falha ao declarar exchange "+exchangeReservaCriada)
+	err = ch.ExchangeDeclare(exchangeReservaCancelada, "fanout", true, false, false, false, nil)
+	failOnError(err, "Falha ao declarar exchange "+exchangeReservaCancelada)
+
+	// Consumidores
+	go consume(conn, exchangePagamentoAprovado, queueConsumoPagamentoAprovado, handlePaymentStatus)
+	go consume(conn, exchangePagamentoRecusado, queueConsumoPagamentoRecusado, handlePaymentStatus)
+	go consume(conn, exchangeBilheteGerado, queueConsumoBilheteGerado, handleTicketGenerated)
+	go consume(conn, exchangePromocoes, queueConsumoPromocoes, handlePromotion)
+
+	log.Println("Setup RabbitMQ para MS Reserva concluído.")
+}
+
+func consume(conn *amqp.Connection, exchangeName, queueName string, handler func(amqp.Delivery)) {
+	ch, err := conn.Channel()
+	failOnError(err, fmt.Sprintf("Falha ao abrir canal para consumidor de %s", queueName))
 
 	err = ch.ExchangeDeclare(exchangeName, "fanout", true, false, false, false, nil)
-	if err != nil {
-		log.Printf("Erro ao declarar exchange '%s' para consumidor: %v", exchangeName, err)
-		return
-	}
+	failOnError(err, "Falha ao declarar exchange "+exchangeName)
 
 	q, err := ch.QueueDeclare(queueName, true, false, false, false, nil)
-	if err != nil {
-		log.Printf("Erro ao declarar fila de consumo '%s': %v", queueName, err)
-		return
-	}
+	failOnError(err, "Falha ao declarar fila "+queueName)
 
 	err = ch.QueueBind(q.Name, "", exchangeName, false, nil)
+	failOnError(err, fmt.Sprintf("Falha ao vincular fila %s à exchange %s", q.Name, exchangeName))
+
+	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+	failOnError(err, "Falha ao registrar consumidor para "+queueName)
+
+	for d := range msgs {
+		handler(d)
+	}
+}
+
+func handlePaymentStatus(d amqp.Delivery) {
+	log.Printf("Evento de status de pagamento recebido da exchange: %s", d.Exchange)
+	var event model.PaymentStatusEvent
+	json.Unmarshal(d.Body, &event)
+
+	sseEvent := "pagamento_aprovado"
+	if event.Status != "aprovada" {
+		sseEvent = "pagamento_recusado"
+	}
+
+	// A notificação é enviada para o cliente que iniciou a reserva.
+	// O ID do cliente deve ser o mesmo que o ID da reserva para esta simplificação.
+	notifyClient(event.ReservationID, formatSseMessage(sseEvent, string(d.Body)))
+
+	// Se o pagamento foi recusado, a reserva deve ser cancelada.
+	if event.Status == "recusada" {
+		cancelDueToPaymentFailure(event.ReservationID)
+	}
+}
+
+func handleTicketGenerated(d amqp.Delivery) {
+	log.Printf("Evento de bilhete gerado recebido.")
+	var event model.TicketGeneratedEvent
+	json.Unmarshal(d.Body, &event)
+	notifyClient(event.ReservationID, formatSseMessage("bilhete_gerado", string(d.Body)))
+}
+
+func handlePromotion(d amqp.Delivery) {
+	log.Printf("Evento de promoção recebido.")
+	broadcastToInterested(formatSseMessage("promocao", string(d.Body)))
+}
+
+// ---- Handlers da API REST ----
+
+func getItinerariesHandler(c echo.Context) error {
+	msItinerariosURL := os.Getenv("MS_ITINERARIOS_URL")
+	if msItinerariosURL == "" {
+		msItinerariosURL = "http://localhost:8082/itineraries"
+	}
+
+	resp, err := http.Get(msItinerariosURL)
 	if err != nil {
-		log.Printf("Erro ao vincular fila '%s' à exchange '%s': %v", q.Name, exchangeName, err)
-		return
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "MS Itinerários indisponível"})
 	}
-	log.Printf("Fila de consumo '%s' vinculada à exchange '%s'", q.Name, exchangeName)
+	defer resp.Body.Close()
 
-	err = ch.Qos(1, 0, false)
-	if err != nil {
-		log.Printf("Erro ao configurar QoS para fila '%s': %v", queueName, err)
-		return
-	}
-
-	consumerTag := fmt.Sprintf("consumer-%s-%s-%d", exchangeName, queueName, time.Now().UnixNano())
-	msgs, err := ch.Consume(q.Name, consumerTag, false, false, false, false, nil)
-	if err != nil {
-		log.Printf("Erro ao registrar consumidor para fila '%s': %v", queueName, err)
-		return
-	}
-	log.Printf("Consumidor '%s' para fila '%s' (exchange '%s') iniciado.", consumerTag, q.Name, exchangeName)
-
-	chErrors := make(chan *amqp.Error)
-	ch.NotifyClose(chErrors)
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("Contexto cancelado para consumidor da fila '%s'. Encerrando...", queueName)
-			if errCancel := ch.Cancel(consumerTag, false); errCancel != nil {
-				log.Printf("Erro ao cancelar consumidor '%s': %v", consumerTag, errCancel)
-			}
-			return
-		case errClose, ok := <-chErrors:
-			if !ok || errClose != nil {
-				log.Printf("Canal AMQP para consumidor da fila '%s' fechado (erro: %v, ok: %t).", queueName, errClose, ok)
-			}
-			return
-		case d, ok := <-msgs:
-			if !ok {
-				log.Printf("Canal de entregas (msgs) para fila '%s' foi fechado.", queueName)
-				return
-			}
-			log.Printf("Recebida mensagem na fila '%s' (DeliveryTag: %d) da exchange '%s'", queueName, d.DeliveryTag, exchangeName)
-
-			// Extrair assinatura e sender_id dos headers
-			signature, sigOk := d.Headers["signature"].([]byte)
-			senderID, senderOk := d.Headers["sender_id"].(string)
-
-			if !sigOk || !senderOk {
-				log.Printf("Header 'signature' ou 'sender_id' ausente ou tipo incorreto para DeliveryTag: %d. Rejeitando.", d.DeliveryTag)
-				d.Nack(false, false)
-				continue
-			}
-
-			if senderID != expectedSenderID {
-				log.Printf("SenderID inesperado '%s' (esperado '%s') para DeliveryTag: %d. Rejeitando.", senderID, expectedSenderID, d.DeliveryTag)
-				d.Nack(false, false)
-				continue
-			}
-
-			// Verificar assinatura
-			errVerify := verifySignature(d.Body, signature, expectedSenderPublicKey)
-			if errVerify != nil {
-				log.Printf("Falha na verificação da assinatura para DeliveryTag: %d (remetente: %s): %v. Rejeitando.", d.DeliveryTag, senderID, errVerify)
-				d.Nack(false, false) // Não reenfileirar mensagens com assinatura inválida
-				continue
-			}
-			log.Printf("Assinatura verificada com sucesso para DeliveryTag: %d (remetente: %s).", d.DeliveryTag, senderID)
-
-			if errHandler := handlerFunc(d); errHandler != nil {
-				log.Printf("Erro no handler para DeliveryTag: %d na fila '%s': %v", d.DeliveryTag, queueName, errHandler)
-				d.Nack(false, false)
-			} else {
-				d.Ack(false)
-				log.Printf("Mensagem (DeliveryTag: %d) da fila '%s' processada e confirmada com sucesso.", d.DeliveryTag, queueName)
-			}
-		}
-	}
-}
-
-func handlePagamentoAprovado(msg amqp.Delivery) error {
-	log.Printf("Handler: Pagamento Aprovado recebido (corpo já verificado): %s", msg.Body)
-	var paymentResponse model.PaymentResponse
-	if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
-		return fmt.Errorf("erro ao decodificar JSON de pagamento aprovado: %w", err)
-	}
-	log.Printf("Pagamento aprovado para ReservationID: %s. Aguardando bilhete.", paymentResponse.ReservationID)
-	return nil
-}
-
-func handlePagamentoRecusado(msg amqp.Delivery) error {
-	log.Printf("Handler: Pagamento Recusado recebido (corpo já verificado): %s", msg.Body)
-	var paymentResponse model.PaymentResponse
-	if err := json.Unmarshal(msg.Body, &paymentResponse); err != nil {
-		return fmt.Errorf("erro ao decodificar JSON de pagamento recusado: %w", err)
-	}
-
-	mu.Lock()
-	if resultChan, ok := paymentResults[paymentResponse.ReservationID]; ok {
-		select {
-		case resultChan <- paymentResponse:
-			log.Printf("Notificado HTTP handler sobre pagamento recusado para ReservationID: %s", paymentResponse.ReservationID)
-		default:
-			log.Printf("Não foi possível enviar resultado de pagamento recusado para ReservationID %s: canal de resposta bloqueado ou fechado.", paymentResponse.ReservationID)
-		}
-	} else {
-		log.Printf("Nenhum HTTP handler aguardando por resultado de pagamento recusado para ReservationID: %s", paymentResponse.ReservationID)
-	}
-	mu.Unlock()
-	log.Printf("Cancelando reserva (simulado) para ReservationID: %s devido a pagamento recusado.", paymentResponse.ReservationID)
-	return nil
-}
-
-func handleBilheteGerado(msg amqp.Delivery) error {
-	log.Printf("Handler: Bilhete Gerado recebido (corpo já verificado): %s", msg.Body)
-	var bilheteResponse model.BilheteResponse
-	if err := json.Unmarshal(msg.Body, &bilheteResponse); err != nil {
-		return fmt.Errorf("erro ao decodificar JSON de bilhete gerado: %w", err)
-	}
-
-	mu.Lock()
-	if respChan, ok := responses[bilheteResponse.ReservationID]; ok {
-		select {
-		case respChan <- bilheteResponse:
-			log.Printf("Enviado bilhete para HTTP handler para ReservationID: %s", bilheteResponse.ReservationID)
-		default:
-			log.Printf("Não foi possível enviar bilhete para ReservationID %s: canal de resposta bloqueado ou fechado.", bilheteResponse.ReservationID)
-		}
-	} else {
-		log.Printf("Nenhum HTTP handler aguardando por bilhete para ReservationID: %s", bilheteResponse.ReservationID)
-	}
-	mu.Unlock()
-	return nil
-}
-
-func listCruisesHandler(c echo.Context) error {
-	log.Println("Recebida requisição para listar cruzeiros.")
-	if listaDeCruzeiros == nil {
-		log.Println("Lista de cruzeiros não carregada.")
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Dados de cruzeiros não disponíveis."})
-	}
-	return c.JSON(http.StatusOK, listaDeCruzeiros)
-}
-
-func getCruiseDetailsHandler(c echo.Context) error {
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		log.Printf("ID de cruzeiro inválido recebido: %s", idStr)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ID de cruzeiro inválido"})
-	}
-	log.Printf("Recebida requisição para detalhes do cruzeiro ID: %d", id)
-
-	for _, cruzeiro := range listaDeCruzeiros {
-		if cruzeiro.ID == id {
-			return c.JSON(http.StatusOK, cruzeiro)
-		}
-	}
-	log.Printf("Cruzeiro com ID: %d não encontrado.", id)
-	return c.JSON(http.StatusNotFound, map[string]string{"error": "Cruzeiro não encontrado"})
+	var itineraries []interface{}
+	json.NewDecoder(resp.Body).Decode(&itineraries)
+	return c.JSON(http.StatusOK, itineraries)
 }
 
 func createReservationHandler(c echo.Context) error {
-	if amqpChannel == nil || amqpConnection == nil || amqpConnection.IsClosed() {
-		log.Println("Conexão/Canal AMQP não está pronto para createReservationHandler.")
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Serviço de mensageria indisponível"})
+	var req model.ReservationRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Dados de reserva inválidos"})
 	}
 
-	var request model.ReservationRequest
-	if err := c.Bind(&request); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Dados inválidos para reserva"})
+	event := model.ReservationCreatedEvent{
+		ReservationID:      uuid.New().String(),
+		ReservationRequest: req,
 	}
-	if request.CruiseID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ID do cruzeiro é obrigatório"})
-	}
-	if request.Customer == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Nome do cliente é obrigatório"})
-	}
-	if request.Passengers <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Número de passageiros deve ser maior que zero"})
-	}
+	log.Printf("Iniciando criação de reserva ID: %s", event.ReservationID)
 
-	request.ReservationID = uuid.New().String()
-	log.Printf("Criando reserva com ID: %s para cruzeiro ID: %s", request.ReservationID, request.CruiseID)
+	reservationsMutex.Lock()
+	activeReservations[event.ReservationID] = event
+	reservationsMutex.Unlock()
 
-	bilheteResponseChan := make(chan model.BilheteResponse, 1)
-	pagamentoRecusadoChan := make(chan model.PaymentResponse, 1)
-
-	mu.Lock()
-	responses[request.ReservationID] = bilheteResponseChan
-	paymentResults[request.ReservationID] = pagamentoRecusadoChan
-	mu.Unlock()
-
-	defer func() {
-		mu.Lock()
-		delete(responses, request.ReservationID)
-		delete(paymentResults, request.ReservationID)
-		mu.Unlock()
-		log.Printf("Canais de resposta para ReservationID %s limpos.", request.ReservationID)
-	}()
-
-	body, err := json.Marshal(request)
+	body, _ := json.Marshal(event)
+	err := amqpChannel.Publish(exchangeReservaCriada, "", false, false, amqp.Publishing{
+		ContentType: "application/json", Body: body,
+	})
 	if err != nil {
-		log.Printf("Erro ao codificar JSON da requisição de reserva %s: %v", request.ReservationID, err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao processar requisição"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao publicar evento de reserva"})
+	}
+	log.Printf("Evento de reserva %s publicado.", event.ReservationID)
+
+	paymentReq := model.PaymentLinkRequest{
+		ReservationID: event.ReservationID,
+		Valor:         req.ValorTotal,
+		Customer:      req.Customer,
+	}
+	paymentBody, _ := json.Marshal(paymentReq)
+
+	msPagamentoURL := os.Getenv("MS_PAGAMENTO_URL")
+	if msPagamentoURL == "" {
+		msPagamentoURL = "http://localhost:8081/create-payment-link"
 	}
 
-	// Assinar a mensagem com a chave privada do MSReserva
-	signature, err := signMessage(body, msReservaPrivateKey)
+	resp, err := http.Post(msPagamentoURL, "application/json", bytes.NewBuffer(paymentBody))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "Falha ao contatar serviço de pagamento"})
+	}
+	defer resp.Body.Close()
+
+	var paymentLinkResp model.PaymentLinkResponse
+	json.NewDecoder(resp.Body).Decode(&paymentLinkResp)
+
+	return c.JSON(http.StatusCreated, paymentLinkResp)
+}
+
+func cancelReservationHandler(c echo.Context) error {
+	var req model.CancelRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ID da reserva é obrigatório"})
+	}
+
+	reservationsMutex.Lock()
+	res, ok := activeReservations[req.ReservationID]
+	if !ok {
+		reservationsMutex.Unlock()
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Reserva não encontrada ou já finalizada"})
+	}
+	delete(activeReservations, req.ReservationID)
+	reservationsMutex.Unlock()
+
+	event := model.ReservationCancelledEvent{
+		ReservationID: req.ReservationID,
+		CruiseID:      res.CruiseID,
+		NumeroCabines: res.NumeroCabines,
+		Reason:        "Cancelado pelo cliente via endpoint",
+	}
+
+	body, _ := json.Marshal(event)
+	err := amqpChannel.Publish(exchangeReservaCancelada, "", false, false, amqp.Publishing{
+		ContentType: "application/json", Body: body,
+	})
 	if err != nil {
-		log.Printf("Erro ao assinar mensagem de reserva para %s: %v", request.ReservationID, err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao assinar mensagem"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao publicar evento de cancelamento"})
 	}
 
-	err = amqpChannel.Publish(
-		exchangeReservaCriada,
-		"",
-		false,
-		false,
-		amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "application/json",
-			Body:         body,
-			Headers: amqp.Table{
-				"signature": signature,
-				"sender_id": senderIDMSReserva, // Identificador do remetente
-			},
-		})
+	log.Printf("Solicitação de cancelamento para reserva %s enviada.", req.ReservationID)
+	return c.JSON(http.StatusOK, map[string]string{"message": "Solicitação de cancelamento processada"})
+}
+
+func cancelDueToPaymentFailure(reservationID string) {
+	reservationsMutex.Lock()
+	res, ok := activeReservations[reservationID]
+	if !ok {
+		reservationsMutex.Unlock()
+		log.Printf("Tentativa de cancelar reserva %s por falha de pagamento, mas não foi encontrada.", reservationID)
+		return
+	}
+	delete(activeReservations, reservationID)
+	reservationsMutex.Unlock()
+
+	event := model.ReservationCancelledEvent{
+		ReservationID: reservationID,
+		CruiseID:      res.CruiseID,
+		NumeroCabines: res.NumeroCabines,
+		Reason:        "Pagamento recusado",
+	}
+
+	body, _ := json.Marshal(event)
+	err := amqpChannel.Publish(exchangeReservaCancelada, "", false, false, amqp.Publishing{
+		ContentType: "application/json", Body: body,
+	})
 	if err != nil {
-		log.Printf("Erro ao publicar mensagem na exchange '%s' para %s: %v", exchangeReservaCriada, request.ReservationID, err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao enviar mensagem de reserva"})
-	}
-	log.Printf("Mensagem de reserva criada para %s publicada com sucesso na exchange '%s'.", request.ReservationID, exchangeReservaCriada)
-
-	select {
-	case bilhete := <-bilheteResponseChan:
-		log.Printf("Bilhete recebido para ReservationID %s via HTTP handler.", bilhete.ReservationID)
-		return c.JSON(http.StatusOK, bilhete)
-	case pagamento := <-pagamentoRecusadoChan:
-		log.Printf("Pagamento recusado para ReservationID %s via HTTP handler.", pagamento.ReservationID)
-		return c.JSON(http.StatusAccepted, map[string]string{
-			"status":  pagamento.Status,
-			"message": pagamento.Message,
-			"details": fmt.Sprintf("Pagamento para reserva %s foi recusado.", pagamento.ReservationID),
-		})
-	case <-time.After(30 * time.Second):
-		log.Printf("Timeout ao aguardar resposta para ReservationID %s.", request.ReservationID)
-		return c.JSON(http.StatusRequestTimeout, map[string]string{"error": "Timeout ao processar a reserva"})
+		log.Printf("Erro ao publicar cancelamento por falha de pagamento para reserva %s: %v", reservationID, err)
+	} else {
+		log.Printf("Cancelamento por falha de pagamento para reserva %s publicado.", reservationID)
 	}
 }
 
-func main() {
-	log.Println("Iniciando microserviço de reservas...")
-	loadCertificates()
+func sseNotificationsHandler(c echo.Context) error {
+	// Para o trabalho, o ID do cliente será o mesmo ID da reserva para simplificar o rastreamento.
+	clientID := c.Param("clientId")
+	c.Response().Header().Set("Content-Type", "text/event-stream")
+	c.Response().Header().Set("Cache-Control", "no-cache")
+	c.Response().Header().Set("Connection", "keep-alive")
+	c.Response().Header().Set("Access-Control-Allow-Origin", "*")
 
-	cruzeirosFilePath := os.Getenv("CRUZEIROS_JSON_PATH")
-	if cruzeirosFilePath == "" {
-		cruzeirosFilePath = "data/cruzeiros.json"
-		if _, statErr := os.Stat("/.dockerenv"); statErr == nil {
-			cruzeirosFilePath = "/app/cruzeiros.json"
+	client := &SseClient{
+		channel:           make(chan string, 10),
+		interestedInPromo: true, // Por padrão, todos se interessam.
+	}
+
+	clientsMu.Lock()
+	clients[clientID] = client
+	clientsMu.Unlock()
+
+	defer func() {
+		clientsMu.Lock()
+		delete(clients, clientID)
+		clientsMu.Unlock()
+		log.Printf("Cliente SSE %s desconectado.", clientID)
+	}()
+
+	log.Printf("Cliente SSE %s conectado.", clientID)
+	fmt.Fprintf(c.Response().Writer, formatSseMessage("connection_ready", `{"clientId": "`+clientID+`"}`))
+	c.Response().Flush()
+
+	for {
+		select {
+		case msg := <-client.channel:
+			if _, err := fmt.Fprint(c.Response().Writer, msg); err != nil {
+				return err
+			}
+			c.Response().Flush()
+		case <-c.Request().Context().Done():
+			return nil
 		}
 	}
-	errLoad := loadCruzeirosData(cruzeirosFilePath)
-	failOnError(errLoad, fmt.Sprintf("Falha ao carregar dados dos cruzeiros de %s", cruzeirosFilePath))
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
+func updateInterestHandler(c echo.Context) error {
+	var req model.InterestNotification
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Payload inválido"})
+	}
 
-	wg.Add(1)
-	go setupRabbitMQ(ctx, &wg)
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+
+	if client, ok := clients[req.ClientID]; ok {
+		client.interestedInPromo = req.Interested
+		status := "ativado"
+		if !req.Interested {
+			status = "desativado"
+		}
+		log.Printf("Interesse em promoções %s para o cliente %s", status, req.ClientID)
+		return c.JSON(http.StatusOK, map[string]interface{}{"clientId": req.ClientID, "interest": status})
+	}
+
+	return c.JSON(http.StatusNotFound, map[string]string{"error": "Cliente não encontrado"})
+}
+
+func main() {
+	log.Println("Iniciando MS Reserva...")
+	setupRabbitMQ()
 
 	e := echo.New()
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins: []string{"*"},
-		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
-		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodOptions},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
 	}))
 
-	e.GET("/cruzeiros", listCruisesHandler)
-	e.GET("/cruzeiros/:id", getCruiseDetailsHandler)
+	// Endpoints
+	e.GET("/itineraries", getItinerariesHandler)
 	e.POST("/reservations", createReservationHandler)
+	e.POST("/reservations/cancel", cancelReservationHandler)
+	e.GET("/notifications/:clientId", sseNotificationsHandler)
+	e.POST("/notifications/interest", updateInterestHandler)
 
-	go func() {
-		httpPort := os.Getenv("HTTP_PORT_MSRESERVA")
-		if httpPort == "" {
-			httpPort = "8080"
-		}
-		log.Printf("Servidor de reservas HTTP escutando na porta %s", httpPort)
-		if err := e.Start(":" + httpPort); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Erro ao iniciar servidor HTTP: %v", err)
-		}
-	}()
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Recebido sinal de encerramento, iniciando shutdown gracioso...")
-
-	cancel()
-
-	shutdownCtxHttp, shutdownCancelHttp := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancelHttp()
-	if err := e.Shutdown(shutdownCtxHttp); err != nil {
-		log.Printf("Erro no shutdown do servidor HTTP: %v", err)
-	} else {
-		log.Println("Servidor HTTP encerrado.")
+	httpPort := os.Getenv("HTTP_PORT_MSRESERVA")
+	if httpPort == "" {
+		httpPort = "8080"
 	}
-
-	log.Println("Aguardando todas as goroutines RabbitMQ terminarem...")
-	wgDone := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(wgDone)
-	}()
-
-	select {
-	case <-wgDone:
-		log.Println("Todas as goroutines RabbitMQ terminaram.")
-	case <-time.After(15 * time.Second):
-		log.Println("Timeout esperando goroutines RabbitMQ.")
+	log.Printf("Servidor de reservas HTTP escutando na porta %s", httpPort)
+	if err := e.Start(":" + httpPort); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Erro ao iniciar servidor HTTP: %v", err)
 	}
-	log.Println("Microserviço de reservas encerrado.")
 }

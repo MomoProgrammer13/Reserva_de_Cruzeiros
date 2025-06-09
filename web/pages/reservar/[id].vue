@@ -114,9 +114,9 @@ function updateTotalPriceOnLoad(valorCabine: number) {
   totalPrice.value = reservationForm.passengers * valorCabine;
 }
 
-// Observar mudanças nos passageiros para atualizar o preço total
+
 watch(() => reservationForm.passengers, updateTotalPrice);
-// Observar se cruzeiroData é carregado para calcular o preço inicial
+
 watch(cruzeiroData, (newData) => {
   if (newData) {
     updateTotalPriceOnLoad(newData.valorCabine);
@@ -144,7 +144,7 @@ async function handleReservation() {
   };
 
   try {
-    // A resposta do endpoint /reservations é BilheteResponse em caso de sucesso
+    
     const response = await $fetch<BilheteResponse>(`${API_BASE_URL}/reservations`, {
       method: 'POST',
       body: payload,

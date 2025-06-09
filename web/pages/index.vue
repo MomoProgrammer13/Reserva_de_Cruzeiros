@@ -34,7 +34,7 @@ interface Cruzeiro {
   descricaoDetalhada?: string;
 }
 
-// Definindo a URL base da API. Ajuste se o backend rodar em outra porta/host.
+
 const API_BASE_URL = 'http://localhost:8080';
 
 const { data: cruzeiros, pending, error } = await useAsyncData<Cruzeiro[]>(
