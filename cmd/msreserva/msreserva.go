@@ -105,7 +105,6 @@ func setupRabbitMQ() {
 	log.Println("Setup RabbitMQ para MS Reserva concluído.")
 }
 
-// CORRIGIDO: Removido 'defer ch.Close()' para manter os consumidores a correr.
 func consume(conn *amqp.Connection, exchangeName, queueName string, handler func(amqp.Delivery)) {
 	ch, err := conn.Channel()
 	failOnError(err, fmt.Sprintf("Falha ao abrir canal para consumidor de %s", queueName))
@@ -146,11 +145,12 @@ func handlePaymentStatus(d amqp.Delivery) {
 		return
 	}
 
-	sseEvent := "pagamento_aprovado"
+	sseEvento := "pagamento_aprovado"
 	if event.Status != "aprovada" {
-		sseEvent = "pagamento_recusado"
+		sseEvento = "pagamento_recusado"
 	}
-	notifyClient(clientID, formatSseMessage(sseEvent, string(d.Body)))
+
+	notifyClient(clientID, formatSseMessage(sseEvento, string(d.Body)))
 
 	if event.Status == "recusada" {
 		cancelDueToPaymentFailure(event.ReservationID)
@@ -205,7 +205,6 @@ func createReservationHandler(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Dados de reserva inválidos: " + err.Error()})
 	}
 
-	// CORRIGIDO: Adicionada verificação para garantir que o ClientID não está vazio.
 	if req.ClientID == "" {
 		log.Println("ERRO CRÍTICO: Pedido de reserva recebido sem ClientID.")
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ClientID é obrigatório"})
@@ -316,6 +315,12 @@ func cancelDueToPaymentFailure(reservationID string) {
 		ContentType: "application/json", Body: body,
 	})
 	log.Printf("Cancelamento por falha de pagamento para reserva %s publicado.", reservationID)
+
+	mapMutex.RLock()
+	clientID, ok := reservationToClientMap[event.ReservationID]
+	mapMutex.RUnlock()
+
+	notifyClient(clientID, formatSseMessage("reserva_cancelada", string(body)))
 }
 
 func sseNotificationsHandler(c echo.Context) error {

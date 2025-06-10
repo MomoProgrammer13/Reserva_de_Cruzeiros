@@ -87,6 +87,11 @@ export const useSseStore = defineStore('sse', {
         this.paymentEvents[data.reservationId] = { ...data, status: 'recusada' };
       });
 
+      eventSource.addEventListener('reserva_cancelada', (event: MessageEvent) => {
+        const data: PaymentStatusEvent = JSON.parse(event.data);
+        this.paymentEvents[data.reservationId] = { ...data, status: 'recusada' };
+      });
+
       eventSource.addEventListener('bilhete_gerado', (event: MessageEvent) => {
         const ticketData: TicketGeneratedEvent = JSON.parse(event.data);
         this.ticketEvents[ticketData.reservationId] = ticketData;
