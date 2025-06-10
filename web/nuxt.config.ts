@@ -2,14 +2,9 @@
 export default defineNuxtConfig({
   devtools: { enabled: true },
   modules: [
-    '@nuxtjs/tailwindcss' // Adiciona o módulo Tailwind CSS
+    '@nuxtjs/tailwindcss',
+    '@pinia/nuxt'
   ],
-  // Configuração para chamadas de API, se necessário (ex: proxy ou baseURL)
-  // runtimeConfig: {
-  //   public: {
-  //     apiBase: 'http://localhost:8080' // URL do seu backend Go
-  //   }
-  // },
   app: {
     head: {
       title: 'Reserva de Cruzeiros',

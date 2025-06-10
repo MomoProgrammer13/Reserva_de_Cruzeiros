@@ -88,7 +88,6 @@ func paymentWebhookHandler(c echo.Context) error {
 		Status:        payload.Status,
 		IssueDate:     time.Now(),
 		Customer:      payload.Comprador,
-		// CruiseID e outros dados teriam que ser recuperados de um DB.
 	}
 
 	var targetExchange string

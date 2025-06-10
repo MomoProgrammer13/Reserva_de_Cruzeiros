@@ -119,7 +119,6 @@ func handleReservaCriada(d amqp.Delivery) {
 			d.Ack(false)
 		} else {
 			log.Printf("Reserva %s: Não há cabines suficientes para o cruzeiro %d. Solicitado: %d, Disponível: %d", event.ReservationID, event.CruiseID, event.NumeroCabines, cruzeiro.CabinesDisponiveis)
-			// Idealmente, um evento de falha seria publicado aqui
 			d.Nack(false, false)
 		}
 	} else {
@@ -167,7 +166,7 @@ func main() {
 
 	cruzeirosFilePath := os.Getenv("CRUZEIROS_JSON_PATH")
 	if cruzeirosFilePath == "" {
-		cruzeirosFilePath = "cruzeiros.json"
+		cruzeirosFilePath = "data/cruzeiros.json"
 	}
 	loadCruzeirosData(cruzeirosFilePath)
 

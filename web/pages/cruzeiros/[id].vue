@@ -25,7 +25,9 @@
               <li><strong>Porto de Desembarque:</strong> {{ cruzeiro.portoDesembarque }}</li>
               <li><strong>Data de Embarque:</strong> {{ formatDate(cruzeiro.dataEmbarque) }}</li>
               <li><strong>Data de Desembarque:</strong> {{ formatDate(cruzeiro.dataDesembarque) }}</li>
-              <li><strong>Cabines Disponíveis:</strong> {{ cruzeiro.cabinesDisponiveis }}</li>
+              <li :class="cruzeiro.cabinesDisponiveis < 20 ? 'text-amber-600 font-semibold' : ''">
+                <strong>Cabines Disponíveis:</strong> {{ cruzeiro.cabinesDisponiveis }}
+              </li>
             </ul>
           </div>
           <div>
@@ -65,15 +67,21 @@ interface CruzeiroDetalhado {
 }
 
 const route = useRoute();
-const cruzeiroId = computed(() => route.params.id as string);
-
+const cruzeiroId = computed(() => parseInt(route.params.id as string));
 const API_BASE_URL = 'http://localhost:8080';
 
-const { data: cruzeiro, pending, error } = await useAsyncData<CruzeiroDetalhado>(
-    `cruzeiro-${cruzeiroId.value}`,
-    () => $fetch(`${API_BASE_URL}/cruzeiros/${cruzeiroId.value}`),
-    { watch: [cruzeiroId] } // Observa mudanças no ID do cruzeiro para recarregar
+// Busca a lista completa e então encontra o cruzeiro pelo ID.
+// Isso se adapta à API atual do backend, que não tem um endpoint para buscar por ID.
+const { data: cruzeiros, pending, error } = await useAsyncData<CruzeiroDetalhado[]>(
+    'itineraries-list-details',
+    () => $fetch(`${API_BASE_URL}/itineraries`),
 );
+
+const cruzeiro = computed(() => {
+    if (!cruzeiros.value) return null;
+    return cruzeiros.value.find(c => c.id === cruzeiroId.value);
+});
+
 
 function formatDate(dateString: string) {
   if (!dateString) return 'Data não informada';

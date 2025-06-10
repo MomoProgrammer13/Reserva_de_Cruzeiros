@@ -4,34 +4,34 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"github.com/streadway/amqp"
 	"log"
 	"net/http"
 	"os"
 	"reserva-cruzeiros/model"
 	"sync"
+
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"github.com/streadway/amqp"
 )
 
-// Estrutura para gerenciar clientes SSE
 type SseClient struct {
 	channel           chan string
 	interestedInPromo bool
 }
 
 var (
-	clients   = make(map[string]*SseClient)
-	clientsMu sync.RWMutex
-	// Cache para reservas em andamento para o cancelamento
-	activeReservations = make(map[string]model.ReservationCreatedEvent)
-	reservationsMutex  sync.Mutex
+	clients                = make(map[string]*SseClient)
+	clientsMu              sync.RWMutex
+	activeReservations     = make(map[string]model.ReservationCreatedEvent)
+	reservationsMutex      sync.Mutex
+	reservationToClientMap = make(map[string]string)
+	mapMutex               sync.RWMutex
 )
 
 var amqpChannel *amqp.Channel
 
-// Nomes das filas e exchanges
 const (
 	exchangeReservaCriada         = "reserva_criada"
 	exchangeReservaCancelada      = "reserva_cancelada"
@@ -50,8 +50,6 @@ func failOnError(err error, msg string) {
 		log.Fatalf("%s: %s", msg, err)
 	}
 }
-
-// ---- Funções de Notificação SSE ----
 
 func formatSseMessage(event, data string) string {
 	return fmt.Sprintf("event: %s\ndata: %s\n\n", event, data)
@@ -85,8 +83,6 @@ func notifyClient(clientID, message string) {
 	}
 }
 
-// ---- Configuração e Consumidores RabbitMQ ----
-
 func setupRabbitMQ() {
 	rabbitMQURL := os.Getenv("RABBITMQ_URL")
 	if rabbitMQURL == "" {
@@ -99,21 +95,17 @@ func setupRabbitMQ() {
 	failOnError(err, "Falha ao abrir canal")
 	amqpChannel = ch
 
-	// Exchanges para publicação
-	err = ch.ExchangeDeclare(exchangeReservaCriada, "fanout", true, false, false, false, nil)
-	failOnError(err, "Falha ao declarar exchange "+exchangeReservaCriada)
-	err = ch.ExchangeDeclare(exchangeReservaCancelada, "fanout", true, false, false, false, nil)
-	failOnError(err, "Falha ao declarar exchange "+exchangeReservaCancelada)
+	ch.ExchangeDeclare(exchangeReservaCriada, "fanout", true, false, false, false, nil)
+	ch.ExchangeDeclare(exchangeReservaCancelada, "fanout", true, false, false, false, nil)
 
-	// Consumidores
 	go consume(conn, exchangePagamentoAprovado, queueConsumoPagamentoAprovado, handlePaymentStatus)
 	go consume(conn, exchangePagamentoRecusado, queueConsumoPagamentoRecusado, handlePaymentStatus)
 	go consume(conn, exchangeBilheteGerado, queueConsumoBilheteGerado, handleTicketGenerated)
 	go consume(conn, exchangePromocoes, queueConsumoPromocoes, handlePromotion)
-
 	log.Println("Setup RabbitMQ para MS Reserva concluído.")
 }
 
+// CORRIGIDO: Removido 'defer ch.Close()' para manter os consumidores a correr.
 func consume(conn *amqp.Connection, exchangeName, queueName string, handler func(amqp.Delivery)) {
 	ch, err := conn.Channel()
 	failOnError(err, fmt.Sprintf("Falha ao abrir canal para consumidor de %s", queueName))
@@ -130,44 +122,65 @@ func consume(conn *amqp.Connection, exchangeName, queueName string, handler func
 	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
 	failOnError(err, "Falha ao registrar consumidor para "+queueName)
 
+	log.Printf("Consumidor iniciado para a fila %s", queueName)
 	for d := range msgs {
 		handler(d)
 	}
+	log.Printf("Consumidor para a fila %s a terminar.", queueName)
 }
 
 func handlePaymentStatus(d amqp.Delivery) {
-	log.Printf("Evento de status de pagamento recebido da exchange: %s", d.Exchange)
 	var event model.PaymentStatusEvent
-	json.Unmarshal(d.Body, &event)
+	if err := json.Unmarshal(d.Body, &event); err != nil {
+		log.Printf("Erro ao decodificar evento de pagamento: %v", err)
+		return
+	}
+	log.Printf("Evento de status de pagamento recebido para ReservationID: %s", event.ReservationID)
+
+	mapMutex.RLock()
+	clientID, ok := reservationToClientMap[event.ReservationID]
+	mapMutex.RUnlock()
+
+	if !ok {
+		log.Printf("AVISO: ClientID para a reserva %s não encontrado. A notificação não pode ser enviada.", event.ReservationID)
+		return
+	}
 
 	sseEvent := "pagamento_aprovado"
 	if event.Status != "aprovada" {
 		sseEvent = "pagamento_recusado"
 	}
+	notifyClient(clientID, formatSseMessage(sseEvent, string(d.Body)))
 
-	// A notificação é enviada para o cliente que iniciou a reserva.
-	// O ID do cliente deve ser o mesmo que o ID da reserva para esta simplificação.
-	notifyClient(event.ReservationID, formatSseMessage(sseEvent, string(d.Body)))
-
-	// Se o pagamento foi recusado, a reserva deve ser cancelada.
 	if event.Status == "recusada" {
 		cancelDueToPaymentFailure(event.ReservationID)
 	}
 }
 
 func handleTicketGenerated(d amqp.Delivery) {
-	log.Printf("Evento de bilhete gerado recebido.")
 	var event model.TicketGeneratedEvent
-	json.Unmarshal(d.Body, &event)
-	notifyClient(event.ReservationID, formatSseMessage("bilhete_gerado", string(d.Body)))
+	if err := json.Unmarshal(d.Body, &event); err != nil {
+		log.Printf("Erro ao decodificar evento de bilhete: %v", err)
+		return
+	}
+	log.Printf("Evento de bilhete gerado recebido para ReservationID: %s", event.ReservationID)
+
+	mapMutex.RLock()
+	clientID, ok := reservationToClientMap[event.ReservationID]
+	mapMutex.RUnlock()
+
+	if !ok {
+		log.Printf("AVISO: ClientID para a reserva %s não encontrado. A notificação de bilhete não pode ser enviada.", event.ReservationID)
+		return
+	}
+
+	notifyClient(clientID, formatSseMessage("bilhete_gerado", string(d.Body)))
 }
 
 func handlePromotion(d amqp.Delivery) {
 	log.Printf("Evento de promoção recebido.")
 	broadcastToInterested(formatSseMessage("promocao", string(d.Body)))
 }
-
-// ---- Handlers da API REST ----
 
 func getItinerariesHandler(c echo.Context) error {
 	msItinerariosURL := os.Getenv("MS_ITINERARIOS_URL")
@@ -187,28 +200,36 @@ func getItinerariesHandler(c echo.Context) error {
 }
 
 func createReservationHandler(c echo.Context) error {
-	var req model.ReservationRequest
+	var req model.ReservationRequestWithClient
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Dados de reserva inválidos"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Dados de reserva inválidos: " + err.Error()})
+	}
+
+	// CORRIGIDO: Adicionada verificação para garantir que o ClientID não está vazio.
+	if req.ClientID == "" {
+		log.Println("ERRO CRÍTICO: Pedido de reserva recebido sem ClientID.")
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ClientID é obrigatório"})
 	}
 
 	event := model.ReservationCreatedEvent{
 		ReservationID:      uuid.New().String(),
-		ReservationRequest: req,
+		ReservationRequest: req.ReservationRequest,
 	}
-	log.Printf("Iniciando criação de reserva ID: %s", event.ReservationID)
+	log.Printf("Iniciando criação de reserva ID: %s para ClientID: %s", event.ReservationID, req.ClientID)
+
+	mapMutex.Lock()
+	reservationToClientMap[event.ReservationID] = req.ClientID
+	mapMutex.Unlock()
+	log.Printf("Mapeamento criado: ReservationID %s -> ClientID %s", event.ReservationID, req.ClientID)
 
 	reservationsMutex.Lock()
 	activeReservations[event.ReservationID] = event
 	reservationsMutex.Unlock()
 
 	body, _ := json.Marshal(event)
-	err := amqpChannel.Publish(exchangeReservaCriada, "", false, false, amqp.Publishing{
+	amqpChannel.Publish(exchangeReservaCriada, "", false, false, amqp.Publishing{
 		ContentType: "application/json", Body: body,
 	})
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao publicar evento de reserva"})
-	}
 	log.Printf("Evento de reserva %s publicado.", event.ReservationID)
 
 	paymentReq := model.PaymentLinkRequest{
@@ -217,7 +238,6 @@ func createReservationHandler(c echo.Context) error {
 		Customer:      req.Customer,
 	}
 	paymentBody, _ := json.Marshal(paymentReq)
-
 	msPagamentoURL := os.Getenv("MS_PAGAMENTO_URL")
 	if msPagamentoURL == "" {
 		msPagamentoURL = "http://localhost:8081/create-payment-link"
@@ -236,36 +256,37 @@ func createReservationHandler(c echo.Context) error {
 }
 
 func cancelReservationHandler(c echo.Context) error {
-	var req model.CancelRequest
-	if err := c.Bind(&req); err != nil {
+	reservationID := c.Param("reservationId")
+	if reservationID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "ID da reserva é obrigatório"})
 	}
 
 	reservationsMutex.Lock()
-	res, ok := activeReservations[req.ReservationID]
+	res, ok := activeReservations[reservationID]
 	if !ok {
 		reservationsMutex.Unlock()
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "Reserva não encontrada ou já finalizada"})
 	}
-	delete(activeReservations, req.ReservationID)
+	delete(activeReservations, reservationID)
 	reservationsMutex.Unlock()
 
+	mapMutex.Lock()
+	delete(reservationToClientMap, reservationID)
+	mapMutex.Unlock()
+
 	event := model.ReservationCancelledEvent{
-		ReservationID: req.ReservationID,
+		ReservationID: reservationID,
 		CruiseID:      res.CruiseID,
 		NumeroCabines: res.NumeroCabines,
 		Reason:        "Cancelado pelo cliente via endpoint",
 	}
 
 	body, _ := json.Marshal(event)
-	err := amqpChannel.Publish(exchangeReservaCancelada, "", false, false, amqp.Publishing{
+	amqpChannel.Publish(exchangeReservaCancelada, "", false, false, amqp.Publishing{
 		ContentType: "application/json", Body: body,
 	})
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Erro ao publicar evento de cancelamento"})
-	}
 
-	log.Printf("Solicitação de cancelamento para reserva %s enviada.", req.ReservationID)
+	log.Printf("Solicitação de cancelamento para reserva %s enviada.", reservationID)
 	return c.JSON(http.StatusOK, map[string]string{"message": "Solicitação de cancelamento processada"})
 }
 
@@ -274,11 +295,14 @@ func cancelDueToPaymentFailure(reservationID string) {
 	res, ok := activeReservations[reservationID]
 	if !ok {
 		reservationsMutex.Unlock()
-		log.Printf("Tentativa de cancelar reserva %s por falha de pagamento, mas não foi encontrada.", reservationID)
 		return
 	}
 	delete(activeReservations, reservationID)
 	reservationsMutex.Unlock()
+
+	mapMutex.Lock()
+	delete(reservationToClientMap, reservationID)
+	mapMutex.Unlock()
 
 	event := model.ReservationCancelledEvent{
 		ReservationID: reservationID,
@@ -288,32 +312,25 @@ func cancelDueToPaymentFailure(reservationID string) {
 	}
 
 	body, _ := json.Marshal(event)
-	err := amqpChannel.Publish(exchangeReservaCancelada, "", false, false, amqp.Publishing{
+	amqpChannel.Publish(exchangeReservaCancelada, "", false, false, amqp.Publishing{
 		ContentType: "application/json", Body: body,
 	})
-	if err != nil {
-		log.Printf("Erro ao publicar cancelamento por falha de pagamento para reserva %s: %v", reservationID, err)
-	} else {
-		log.Printf("Cancelamento por falha de pagamento para reserva %s publicado.", reservationID)
-	}
+	log.Printf("Cancelamento por falha de pagamento para reserva %s publicado.", reservationID)
 }
 
 func sseNotificationsHandler(c echo.Context) error {
-	// Para o trabalho, o ID do cliente será o mesmo ID da reserva para simplificar o rastreamento.
 	clientID := c.Param("clientId")
 	c.Response().Header().Set("Content-Type", "text/event-stream")
 	c.Response().Header().Set("Cache-Control", "no-cache")
 	c.Response().Header().Set("Connection", "keep-alive")
 	c.Response().Header().Set("Access-Control-Allow-Origin", "*")
 
-	client := &SseClient{
-		channel:           make(chan string, 10),
-		interestedInPromo: true, // Por padrão, todos se interessam.
-	}
+	client := &SseClient{channel: make(chan string, 10)}
 
 	clientsMu.Lock()
 	clients[clientID] = client
 	clientsMu.Unlock()
+	log.Printf("Cliente SSE %s conectado.", clientID)
 
 	defer func() {
 		clientsMu.Lock()
@@ -322,7 +339,6 @@ func sseNotificationsHandler(c echo.Context) error {
 		log.Printf("Cliente SSE %s desconectado.", clientID)
 	}()
 
-	log.Printf("Cliente SSE %s conectado.", clientID)
 	fmt.Fprintf(c.Response().Writer, formatSseMessage("connection_ready", `{"clientId": "`+clientID+`"}`))
 	c.Response().Flush()
 
@@ -330,7 +346,7 @@ func sseNotificationsHandler(c echo.Context) error {
 		select {
 		case msg := <-client.channel:
 			if _, err := fmt.Fprint(c.Response().Writer, msg); err != nil {
-				return err
+				return nil
 			}
 			c.Response().Flush()
 		case <-c.Request().Context().Done():
@@ -357,7 +373,6 @@ func updateInterestHandler(c echo.Context) error {
 		log.Printf("Interesse em promoções %s para o cliente %s", status, req.ClientID)
 		return c.JSON(http.StatusOK, map[string]interface{}{"clientId": req.ClientID, "interest": status})
 	}
-
 	return c.JSON(http.StatusNotFound, map[string]string{"error": "Cliente não encontrado"})
 }
 
@@ -370,14 +385,13 @@ func main() {
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins: []string{"*"},
-		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodOptions},
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
 	}))
 
-	// Endpoints
 	e.GET("/itineraries", getItinerariesHandler)
 	e.POST("/reservations", createReservationHandler)
-	e.POST("/reservations/cancel", cancelReservationHandler)
+	e.DELETE("/reservations/:reservationId", cancelReservationHandler)
 	e.GET("/notifications/:clientId", sseNotificationsHandler)
 	e.POST("/notifications/interest", updateInterestHandler)
 

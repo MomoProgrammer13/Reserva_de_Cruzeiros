@@ -11,7 +11,7 @@ type ItineraryQuery struct {
 	PortoEmbarque string `json:"portoEmbarque"`
 }
 
-// ReservationRequest representa a requisição do frontend para criar uma reserva.
+// ReservationRequest representa os dados base de uma reserva.
 type ReservationRequest struct {
 	CruiseID      int     `json:"cruiseId"`
 	Customer      string  `json:"customer"`
@@ -19,6 +19,12 @@ type ReservationRequest struct {
 	NumeroCabines int     `json:"numeroCabines"`
 	DataEmbarque  string  `json:"dataEmbarque"`
 	ValorTotal    float64 `json:"valorTotal"`
+}
+
+// ReservationRequestWithClient é o payload completo que vem do frontend, incluindo o ID da sessão SSE.
+type ReservationRequestWithClient struct {
+	ReservationRequest
+	ClientID string `json:"clientId"`
 }
 
 // ReservationCreatedEvent é o evento publicado quando uma reserva é criada.
@@ -35,8 +41,8 @@ type CancelRequest struct {
 // ReservationCancelledEvent é o evento publicado quando uma reserva é cancelada.
 type ReservationCancelledEvent struct {
 	ReservationID string `json:"reservationId"`
-	NumeroCabines int    `json:"numeroCabines"` // Necessário para devolver ao estoque
-	CruiseID      int    `json:"cruiseId"`      // Necessário para devolver ao estoque
+	NumeroCabines int    `json:"numeroCabines"`
+	CruiseID      int    `json:"cruiseId"`
 	Reason        string `json:"reason"`
 }
 

@@ -45,7 +45,7 @@ func main() {
 
 	cruzeirosFilePath := os.Getenv("CRUZEIROS_JSON_PATH")
 	if cruzeirosFilePath == "" {
-		cruzeirosFilePath = "cruzeiros.json"
+		cruzeirosFilePath = "data/cruzeiros.json"
 	}
 	loadCruzeirosData(cruzeirosFilePath)
 	if len(listaDeCruzeiros) == 0 {
